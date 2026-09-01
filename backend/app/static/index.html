@@ -4,11 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=0.5.1-flexible-flow" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.0.0-qk-purple-workspace" />
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">
+      <div class="brand topbar-brand">
         <span class="brand-mark">IC</span>
         <span>Interview Copilot</span>
         <span class="subtle">面试官侧边台</span>
@@ -25,11 +25,36 @@
     </header>
 
     <aside id="app-sidebar" class="app-sidebar hidden" aria-label="主要导航">
-      <nav>
-        <button type="button" class="sidebar-nav active" data-app-nav="home"><span>首页</span><small>我的待办</small></button>
-        <button type="button" class="sidebar-nav" data-app-nav="interviews"><span>面试工作台</span><small>安排与实时辅助</small></button>
-        <button id="sidebar-evaluation-btn" type="button" class="sidebar-nav" data-app-nav="evaluation" disabled><span>本轮评价</span><small id="sidebar-evaluation-label">结束面试后生成</small></button>
-        <button type="button" class="sidebar-nav hr-only hidden" data-app-nav="admin"><span>HR 后台</span><small>岗位、候选人与流程</small></button>
+      <div class="sidebar-brand"><span class="brand-mark">IC</span><div><strong>轻功 Interview</strong><small>面试工作空间</small></div></div>
+      <nav class="sidebar-navigation">
+        <section class="sidebar-section interviewer-only">
+          <button type="button" class="sidebar-nav active" data-app-nav="home"><span>工作台</span><small>我的待办</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="interviews"><span>我的面试</span><small>安排与实时辅助</small></button>
+          <button id="sidebar-evaluation-btn" type="button" class="sidebar-nav" data-app-nav="evaluation" disabled><span>本轮评价</span><small id="sidebar-evaluation-label">结束面试后生成</small></button>
+        </section>
+        <section class="sidebar-section hr-only hidden">
+          <p class="sidebar-section-title">招聘流程</p>
+          <button type="button" class="sidebar-nav active" data-app-nav="home"><span>工作台</span><small>今天需要处理</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="admin"><span>面试任务</span><small>排期、改派与状态</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="final-review"><span>待终审</span><small>查看完整面试汇总</small></button>
+        </section>
+        <section class="sidebar-section hr-only hidden">
+          <p class="sidebar-section-title">岗位与标准</p>
+          <button type="button" class="sidebar-nav" data-app-nav="jobs"><span>岗位与 JD</span><small>建立新岗位与要求</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="talent-profile"><span>岗位人才画像</span><small>版本与历史样本</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="company-profile"><span>公司基础画像</span><small>共同能力标准</small></button>
+        </section>
+        <section class="sidebar-section hr-only hidden">
+          <p class="sidebar-section-title">质量与学习</p>
+          <button type="button" class="sidebar-nav" data-app-nav="quality"><span>面试质量</span><small>过程与岗位趋势</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="knowledge"><span>人才知识库</span><small>提案与审批</small></button>
+        </section>
+        <section class="sidebar-section hr-only hidden">
+          <p class="sidebar-section-title">系统管理</p>
+          <button type="button" class="sidebar-nav" data-app-nav="notifications"><span>飞书通知</span><small>草稿与发送队列</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="governance"><span>数据治理</span><small>到期材料与审计</small></button>
+          <button type="button" class="sidebar-nav" data-app-nav="readiness"><span>试点就绪</span><small>上线前检查</small></button>
+        </section>
       </nav>
       <section id="sidebar-score-summary" class="sidebar-score-summary hidden">
         <small>AI 本轮参考</small>
@@ -37,6 +62,7 @@
         <span id="sidebar-score-decision">等待评价</span>
         <button id="sidebar-score-open" type="button" class="text-button">查看证据与建议</button>
       </section>
+      <div class="sidebar-user"><span>当前用户</span><strong id="sidebar-user-role">—</strong></div>
       <p>证据优先<br />最终决定由人作出</p>
     </aside>
 
@@ -114,14 +140,11 @@
         </section>
 
         <section id="admin-panel" class="admin-panel panel hidden">
-          <div class="task-header"><div><span class="kicker">HR ADMIN</span><h2>招聘任务后台</h2><p>统一管理候选人的岗位级面试流程、面试官分配和任务状态。</p></div><button id="admin-close-btn" class="text-button">返回首页</button></div>
-          <div class="admin-toolbar admin-toolbar-primary"><button id="admin-job-btn" class="primary">岗位与 JD</button><button id="admin-import-btn" class="secondary">批量导入候选人</button><button id="admin-create-btn" class="secondary">手动创建面试</button><button id="admin-refresh-btn" class="secondary">刷新列表</button></div>
-          <details class="admin-more-tools">
-            <summary>更多后台功能</summary>
-            <div class="admin-toolbar"><button id="admin-readiness-btn" class="secondary">试点就绪中心</button><button id="admin-quality-btn" class="secondary">面试质量分析</button><button id="admin-company-profile-btn" class="secondary">公司基础画像</button><button id="admin-profile-btn" class="secondary">岗位人才画像</button><button id="admin-knowledge-btn" class="secondary">人才知识库</button><button id="admin-notifications-btn" class="secondary">飞书通知中心</button><button id="admin-governance-btn" class="secondary">数据治理与审计</button></div>
-          </details>
-          <section class="admin-action-center">
-            <div class="evaluation-heading"><div><span class="kicker">ACTION CENTER</span><h3>今日行动中心</h3></div><small>只聚合待处理事项，不自动替人作决定</small></div>
+          <div class="task-header"><div><h2 id="admin-panel-title">招聘工作台</h2><p id="admin-panel-subtitle">今天的面试、待补评价和终审安排集中在这里。</p></div><div class="task-header-actions"><button id="admin-create-btn" class="primary">＋ 创建面试任务</button><button id="admin-close-btn" class="text-button">返回工作台</button></div></div>
+          <div class="admin-toolbar admin-toolbar-primary"><button id="admin-import-btn" class="text-button">批量导入候选人</button><button id="admin-refresh-btn" class="text-button">刷新</button></div>
+          <div id="admin-legacy-actions" class="hidden" aria-hidden="true"><button id="admin-job-btn" type="button">岗位与 JD</button><button id="admin-readiness-btn" type="button">试点就绪中心</button><button id="admin-quality-btn" type="button">面试质量分析</button><button id="admin-company-profile-btn" type="button">公司基础画像</button><button id="admin-profile-btn" type="button">岗位人才画像</button><button id="admin-knowledge-btn" type="button">人才知识库</button><button id="admin-notifications-btn" type="button">飞书通知中心</button><button id="admin-governance-btn" type="button">数据治理与审计</button></div>
+          <section id="admin-action-center" class="admin-action-center">
+            <div class="evaluation-heading"><div><h3>今天需要你处理</h3></div><small>只聚合待处理事项，不自动替人作决定</small></div>
             <div id="admin-action-summary" class="admin-action-summary"></div>
             <div id="admin-action-list" class="admin-action-list"></div>
             <small id="admin-action-boundary" class="admin-action-boundary"></small>
@@ -635,6 +658,6 @@
     </main>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=0.9.0-sidebar-live-followup" defer></script>
+    <script src="/static/app.js?v=1.0.0-qk-purple-workspace" defer></script>
   </body>
 </html>

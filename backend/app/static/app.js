@@ -122,6 +122,7 @@ async function checkHealth() {
     ]);
     state.capabilities = capabilities;
     $("api-status").textContent = `API ${health.version} 在线`;
+    $("api-status").classList.remove("runtime-alert");
     document.querySelector(".status-dot").classList.add("ok");
     renderLlmStatus(capabilities.llm);
     renderAsrStatus(capabilities.asr);
@@ -131,6 +132,7 @@ async function checkHealth() {
     if (auth.authenticated) activateUser(auth.user);
   } catch (error) {
     $("api-status").textContent = "API 不可用";
+    $("api-status").classList.add("runtime-alert");
     toast(error.message, true);
   }
 }
@@ -140,6 +142,7 @@ function renderLlmStatus(llm = {}) {
   const status = llm.status || "mock_rules";
   const healthy = ["ready", "active"].includes(status);
   badge.className = `pill ${healthy ? "ready" : status === "degraded" ? "degraded" : "warning"}`;
+  badge.classList.toggle("runtime-alert", !healthy && status !== "mock_rules");
   const labels = {
     ready: "AI 语义分析在线",
     active: "AI 语义分析在线",
@@ -173,15 +176,25 @@ function renderLlmStatus(llm = {}) {
 function activateUser(user) {
   state.currentUser = user;
   document.body.classList.add("authenticated");
+  document.body.classList.remove("role-hr", "role-admin", "role-interviewer");
+  document.body.classList.add(`role-${user.role}`);
   $("auth-gate").classList.add("hidden");
   $("welcome").classList.remove("hidden");
   $("app-sidebar").classList.remove("hidden");
-  $("current-user").textContent = `${user.display_name} · ${user.role === "interviewer" ? "面试官" : user.role === "hr" ? "招聘 HR" : "管理员"}`;
+  const roleLabel = user.role === "interviewer" ? "面试官" : user.role === "hr" ? "招聘 HR" : "管理员";
+  $("current-user").textContent = `${user.display_name} · ${roleLabel}`;
+  $("sidebar-user-role").textContent = `${user.display_name} · ${roleLabel}`;
   $("logout-btn").classList.remove("hidden");
   document.querySelectorAll(".hr-only").forEach((item) => item.classList.toggle("hidden", !["hr", "admin"].includes(user.role)));
+  document.querySelectorAll(".interviewer-only").forEach((item) => item.classList.toggle("hidden", user.role !== "interviewer"));
   document.querySelectorAll(".admin-only").forEach((item) => item.classList.toggle("hidden", user.role !== "admin"));
-  setSidebarActive("home");
-  loadPersonalActionCenter().catch((error) => toast(error.message, true));
+  const sharedReport = new URLSearchParams(window.location.search).has("report");
+  if (["hr", "admin"].includes(user.role) && !sharedReport) {
+    openAdminPanel("home").catch((error) => toast(error.message, true));
+  } else {
+    setSidebarActive("home");
+    loadPersonalActionCenter().catch((error) => toast(error.message, true));
+  }
   openSharedReportIfRequested().catch((error) => toast(error.message, true));
 }
 
@@ -207,7 +220,11 @@ function setSidebarActive(view) {
   document.querySelectorAll("[data-app-nav]").forEach((button) => button.classList.toggle("active", button.dataset.appNav === view));
 }
 
-function showHomeView() {
+async function showHomeView() {
+  if (state.currentUser && ["hr", "admin"].includes(state.currentUser.role)) {
+    await openAdminPanel("home");
+    return;
+  }
   closeSocket();
   $("workspace").classList.add("hidden");
   $("workspace").classList.remove("evaluation-mode");
@@ -269,6 +286,7 @@ function renderAsrStatus(asr = {}) {
   const provider = asr.provider === "tencent" ? "腾讯云" : "ASR";
   const badge = $("asr-badge");
   badge.className = `pill ${status === "ready" ? "ready" : status === "degraded" ? "degraded" : "warning"}`;
+  badge.classList.toggle("runtime-alert", status !== "ready");
   badge.textContent = status === "ready" ? `${provider} ASR 就绪` : status === "recovering" ? `${provider} ASR 重连中` : status === "degraded" ? `${provider} ASR 降级` : "ASR 未配置";
   $("mode-hint").textContent = status === "ready"
     ? `麦克风真实收音 · ${provider}实时字幕 · 文字输入可作降级测试`
@@ -380,6 +398,7 @@ async function loadAssignableUsers() {
 }
 
 async function openTaskCreator() {
+  setSidebarActive("admin");
   state.schedulingApplicationId = null;
   [state.taskJobs] = await Promise.all([
     api("/api/v1/admin/jobs"),
@@ -388,6 +407,7 @@ async function openTaskCreator() {
   $("workspace").classList.add("hidden");
   $("welcome").classList.remove("hidden");
   $("admin-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("knowledge-panel").classList.add("hidden");
   $("talent-profile-panel").classList.add("hidden");
   $("company-profile-panel").classList.add("hidden");
@@ -442,13 +462,22 @@ function syncTaskJobFields() {
   presetTaskSchedule();
 }
 
-function closeTaskCreator() {
+async function closeTaskCreator() {
+  if (state.currentUser && ["hr", "admin"].includes(state.currentUser.role)) {
+    await openAdminPanel("home");
+    return;
+  }
   $("task-creator").classList.add("hidden");
   $("welcome").querySelector(".welcome-card").classList.remove("hidden");
 }
 
-async function openAdminPanel() {
-  setSidebarActive("admin");
+async function openAdminPanel(view = "admin") {
+  const copy = {
+    home: ["招聘工作台", "今天的面试、待补评价和终审安排集中在这里。"],
+    admin: ["面试任务", "管理候选人的岗位流程、面试官分配和任务状态。"],
+    "final-review": ["待终审", "查看已完成面试的证据汇总，并由 HR 作出最终流程决定。"],
+  }[view] || ["招聘工作台", "今天的面试、待补评价和终审安排集中在这里。"];
+  setSidebarActive(view);
   $("workspace").classList.add("hidden");
   $("welcome").classList.remove("hidden");
   $("welcome").querySelector(".welcome-card").classList.add("hidden");
@@ -463,11 +492,18 @@ async function openAdminPanel() {
   $("governance-panel").classList.add("hidden");
   $("notification-panel").classList.add("hidden");
   $("readiness-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("admin-panel").classList.remove("hidden");
+  $("admin-panel").dataset.view = view;
+  $("admin-panel").classList.toggle("review-queue", view === "final-review");
+  $("admin-panel-title").textContent = copy[0];
+  $("admin-panel-subtitle").textContent = copy[1];
   await Promise.all([loadAssignableUsers(), loadAdminTasks()]);
+  if (view === "final-review") window.setTimeout(() => $("admin-action-center")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
 }
 
 async function openJobCenter(preferredJobId = null) {
+  setSidebarActive("jobs");
   ["admin-panel", "task-creator", "resume-import-panel", "talent-profile-panel", "company-profile-panel", "quality-dashboard-panel", "knowledge-panel", "governance-panel", "notification-panel", "readiness-panel", "report-panel", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("job-center-panel").classList.remove("hidden");
   try {
@@ -475,10 +511,8 @@ async function openJobCenter(preferredJobId = null) {
   } catch (error) { toast(error.message, true); }
 }
 
-function closeJobCenter() {
-  $("job-center-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
-  loadAdminTasks();
+async function closeJobCenter() {
+  await openAdminPanel("home");
 }
 
 async function loadJobCenter(preferredJobId = null) {
@@ -643,6 +677,7 @@ async function openSelectedJobResumeImport() {
 }
 
 async function openResumeImport(preferredJobId = null) {
+  setSidebarActive("admin");
   $("admin-panel").classList.add("hidden");
   $("report-panel").classList.add("hidden");
   $("governance-panel").classList.add("hidden");
@@ -651,6 +686,7 @@ async function openResumeImport(preferredJobId = null) {
   $("quality-dashboard-panel").classList.add("hidden");
   $("task-creator").classList.add("hidden");
   $("job-center-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("resume-import-panel").classList.remove("hidden");
   state.importBatch = null;
   state.importItems = [];
@@ -664,10 +700,8 @@ async function openResumeImport(preferredJobId = null) {
   renderImportJobContext();
 }
 
-function closeResumeImport() {
-  $("resume-import-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
-  loadAdminTasks();
+async function closeResumeImport() {
+  await openAdminPanel("admin");
 }
 
 function renderImportJobContext() {
@@ -798,21 +832,25 @@ async function commitResumeImport() {
   }
 }
 
-function closeAdminPanel() {
+async function closeAdminPanel() {
+  if (state.currentUser && ["hr", "admin"].includes(state.currentUser.role)) {
+    await showHomeView();
+    return;
+  }
   $("admin-panel").classList.add("hidden");
   $("welcome").querySelector(".welcome-card").classList.remove("hidden");
   setSidebarActive("home");
 }
 
 async function openReadinessCenter() {
+  setSidebarActive("readiness");
   ["admin-panel", "quality-dashboard-panel", "knowledge-panel", "talent-profile-panel", "company-profile-panel", "job-center-panel", "governance-panel", "notification-panel", "report-panel", "resume-import-panel", "task-creator", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("readiness-panel").classList.remove("hidden");
   await loadReadinessCenter();
 }
 
-function closeReadinessCenter() {
-  $("readiness-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeReadinessCenter() {
+  await openAdminPanel("home");
 }
 
 async function loadReadinessCenter() {
@@ -900,6 +938,7 @@ async function testReadinessCheck(button) {
 }
 
 async function openQualityDashboard() {
+  setSidebarActive("quality");
   $("admin-panel").classList.add("hidden");
   $("readiness-panel").classList.add("hidden");
   $("report-panel").classList.add("hidden");
@@ -909,6 +948,7 @@ async function openQualityDashboard() {
   $("job-center-panel").classList.add("hidden");
   $("governance-panel").classList.add("hidden");
   $("notification-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("quality-dashboard-panel").classList.remove("hidden");
   try {
     state.qualityJobs = await api("/api/v1/admin/jobs");
@@ -920,9 +960,8 @@ async function openQualityDashboard() {
   } catch (error) { toast(error.message, true); }
 }
 
-function closeQualityDashboard() {
-  $("quality-dashboard-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeQualityDashboard() {
+  await openAdminPanel("home");
 }
 
 async function loadQualityDashboard() {
@@ -975,22 +1014,24 @@ function renderQualityDashboard() {
 }
 
 async function openKnowledgePanel() {
+  setSidebarActive("knowledge");
   $("admin-panel").classList.add("hidden");
   $("readiness-panel").classList.add("hidden");
   $("quality-dashboard-panel").classList.add("hidden");
   $("report-panel").classList.add("hidden");
   $("governance-panel").classList.add("hidden");
   $("notification-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("knowledge-panel").classList.remove("hidden");
   await loadKnowledgeCenter();
 }
 
-function closeKnowledgePanel() {
-  $("knowledge-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeKnowledgePanel() {
+  await openAdminPanel("home");
 }
 
 async function openTalentProfilePanel(preferredJobId = null) {
+  setSidebarActive("talent-profile");
   $("admin-panel").classList.add("hidden");
   $("readiness-panel").classList.add("hidden");
   $("knowledge-panel").classList.add("hidden");
@@ -999,6 +1040,7 @@ async function openTalentProfilePanel(preferredJobId = null) {
   $("governance-panel").classList.add("hidden");
   $("notification-panel").classList.add("hidden");
   $("job-center-panel").classList.add("hidden");
+  $("final-review-panel").classList.add("hidden");
   $("talent-profile-panel").classList.remove("hidden");
   $("company-profile-panel").classList.add("hidden");
   try {
@@ -1013,21 +1055,20 @@ async function openTalentProfilePanel(preferredJobId = null) {
   } catch (error) { toast(error.message, true); }
 }
 
-function closeTalentProfilePanel() {
+async function closeTalentProfilePanel() {
   clearHistoricalImport();
-  $("talent-profile-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+  await openAdminPanel("home");
 }
 
 async function openGovernanceCenter() {
+  setSidebarActive("governance");
   ["admin-panel", "readiness-panel", "knowledge-panel", "talent-profile-panel", "company-profile-panel", "job-center-panel", "quality-dashboard-panel", "notification-panel", "report-panel", "resume-import-panel", "task-creator", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("governance-panel").classList.remove("hidden");
   await loadGovernanceCenter();
 }
 
-function closeGovernanceCenter() {
-  $("governance-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeGovernanceCenter() {
+  await openAdminPanel("home");
 }
 
 async function loadGovernanceCenter() {
@@ -1113,14 +1154,14 @@ async function executeGovernanceCleanup() {
 }
 
 async function openNotificationCenter() {
+  setSidebarActive("notifications");
   ["admin-panel", "readiness-panel", "knowledge-panel", "talent-profile-panel", "company-profile-panel", "job-center-panel", "quality-dashboard-panel", "governance-panel", "report-panel", "resume-import-panel", "task-creator", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("notification-panel").classList.remove("hidden");
   await syncNotificationQueue();
 }
 
-function closeNotificationCenter() {
-  $("notification-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeNotificationCenter() {
+  await openAdminPanel("home");
 }
 
 async function syncNotificationQueue() {
@@ -1271,14 +1312,14 @@ function readCompanyCompetencies(validate = true) {
 }
 
 async function openCompanyProfilePanel() {
+  setSidebarActive("company-profile");
   ["admin-panel", "readiness-panel", "knowledge-panel", "talent-profile-panel", "job-center-panel", "quality-dashboard-panel", "governance-panel", "notification-panel", "report-panel", "resume-import-panel", "task-creator", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("company-profile-panel").classList.remove("hidden");
   await loadCompanyProfileCenter();
 }
 
-function closeCompanyProfilePanel() {
-  $("company-profile-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
+async function closeCompanyProfilePanel() {
+  await openAdminPanel("home");
 }
 
 async function loadCompanyProfileCenter() {
@@ -1802,11 +1843,10 @@ function userOptions(selectedOpenId) {
 function renderHrActionCenter(center) {
   const summary = center.summary;
   $("admin-action-summary").innerHTML = `
-    <article><small>待排期</small><strong>${summary.unscheduled}</strong></article>
     <article><small>今日面试</small><strong>${summary.today_interviews}</strong></article>
     <article><small>待补评价</small><strong>${summary.missing_scorecards}</strong></article>
     <article><small>可进入终审</small><strong>${summary.ready_for_decision}</strong></article>
-    <article><small>知识待审批</small><strong>${summary.knowledge_approvals}</strong></article>`;
+    <article><small>待排期</small><strong>${summary.unscheduled}</strong></article>`;
   $("admin-action-boundary").textContent = center.boundary;
   $("admin-action-list").innerHTML = center.items.length ? center.items.slice(0, 10).map((item) => {
     const subject = item.candidate ? `${item.candidate.display_name} · ${item.job.title}` : "人才知识库";
@@ -1814,7 +1854,7 @@ function renderHrActionCenter(center) {
     return `<article class="admin-action-card ${escapeHtml(item.priority)}">
       <div><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(subject)}</p></div>
       <div class="admin-action-card-meta">${escapeHtml(item.detail)}${timing ? `<br><small>${escapeHtml(timing)}</small>` : ""}</div>
-      <div class="admin-action-buttons"><button class="${item.priority === "urgent" ? "primary" : "secondary"} compact" data-admin-action="${escapeHtml(item.action)}" data-application-id="${escapeHtml(item.application_id || "")}" data-interview-id="${escapeHtml(item.interview_id || "")}">${escapeHtml(item.action_label)}</button>${item.type === "missing_scorecard" ? `<button class="secondary compact todo-remove" data-dismiss-feedback="${escapeHtml(item.interview_id)}">移出待评价</button>` : ""}</div>
+      <div class="admin-action-buttons"><button class="secondary compact" data-admin-action="${escapeHtml(item.action)}" data-application-id="${escapeHtml(item.application_id || "")}" data-interview-id="${escapeHtml(item.interview_id || "")}">${escapeHtml(item.action_label)}</button>${item.type === "missing_scorecard" ? `<button class="secondary compact todo-remove" data-dismiss-feedback="${escapeHtml(item.interview_id)}">移出待评价</button>` : ""}</div>
     </article>`;
   }).join("") : '<p class="muted">当前没有需要 HR 处理的事项。</p>';
   document.querySelectorAll("[data-admin-action]").forEach((button) => button.addEventListener("click", () => handleAdminAction(button)));
@@ -1865,7 +1905,11 @@ async function loadAdminTasks() {
   state.adminTasks = tasks;
   state.hrActions = actionCenter;
   renderHrActionCenter(actionCenter);
-  $("admin-task-list").innerHTML = tasks.map((task) => `
+  const adminView = $("admin-panel")?.dataset.view || "home";
+  const visibleTasks = adminView === "final-review"
+    ? tasks.filter((task) => task.current_stage === "final_review")
+    : tasks;
+  const taskRows = visibleTasks.map((task) => `
     <article class="admin-task">
       <div class="admin-task-head"><div><h3>${escapeHtml(task.candidate.display_name)}</h3><small>${escapeHtml(task.job.title)}</small></div><div>${task.rounds.length ? `<button class="secondary compact" data-final-review="${escapeHtml(task.task_id)}">查看面试汇总</button>` : `<button class="primary compact" data-schedule-application="${escapeHtml(task.task_id)}">配置面试流程</button><button class="danger compact" data-delete-application="${escapeHtml(task.task_id)}" data-candidate-name="${escapeHtml(task.candidate.display_name)}">删除误导入候选人</button>`}<span class="pill">${task.current_stage === "interview_to_schedule" ? "待排期" : escapeHtml(task.current_stage)}</span></div></div>
       <div class="admin-rounds">${task.rounds.map((round) => {
@@ -1879,7 +1923,10 @@ async function loadAdminTasks() {
           <div class="admin-round-actions"><button class="secondary compact" data-save-round ${round.status === "cancelled" ? "disabled" : ""}>保存调整</button><button class="danger compact" data-cancel-round ${round.status === "cancelled" ? "disabled" : ""}>取消本轮</button></div>
         </section>`;
       }).join("")}</div>
-    </article>`).join("") || '<p class="muted">还没有真实面试任务，点击“创建新面试任务”开始。</p>';
+    </article>`).join("");
+  const listTitle = adminView === "final-review" ? "等待 HR 终审" : "最近的面试任务";
+  const listHint = adminView === "final-review" ? "仅显示已完成所需轮次、可进入 HR 决定的候选人" : "按候选人、岗位和当前阶段快速查看";
+  $("admin-task-list").innerHTML = `<div class="admin-list-heading"><div><h3>${listTitle}</h3><span>${listHint}</span></div><span>${visibleTasks.length} 项</span></div>${taskRows || (adminView === "final-review" ? '<p class="muted">当前没有满足终审条件的候选人。</p>' : '<p class="muted">还没有真实面试任务，点击“创建面试任务”开始。</p>')}`;
   document.querySelectorAll("[data-save-round]").forEach((button) => button.addEventListener("click", saveManagedRound));
   document.querySelectorAll("[data-cancel-round]").forEach((button) => button.addEventListener("click", cancelManagedRound));
   document.querySelectorAll("[data-schedule-application]").forEach((button) => button.addEventListener("click", () => scheduleImportedCandidate(tasks.find((task) => task.task_id === button.dataset.scheduleApplication))));
@@ -1899,6 +1946,7 @@ async function deleteUnscheduledApplication(event) {
 
 async function openFinalReview(applicationId) {
   try {
+    setSidebarActive("final-review");
     state.finalReviewApplicationId = applicationId;
     state.finalReview = await api(`/api/v1/admin/applications/${applicationId}/final-review`);
     $("admin-panel").classList.add("hidden");
@@ -1912,9 +1960,7 @@ async function openFinalReview(applicationId) {
 }
 
 async function closeFinalReview() {
-  $("final-review-panel").classList.add("hidden");
-  $("admin-panel").classList.remove("hidden");
-  await loadAdminTasks();
+  await openAdminPanel("final-review");
 }
 
 function renderFinalReview(review) {
@@ -3143,10 +3189,19 @@ function escapeHtml(value) {
 $("today-btn").addEventListener("click", enterTodayInterviews);
 document.querySelectorAll("[data-app-nav]").forEach((button) => button.addEventListener("click", async () => {
   const target = button.dataset.appNav;
-  if (target === "home") showHomeView();
+  if (target === "home") await showHomeView();
   else if (target === "interviews") await showInterviewView();
   else if (target === "evaluation") await showEvaluationView();
-  else if (target === "admin") await openAdminPanel();
+  else if (target === "admin") await openAdminPanel("admin");
+  else if (target === "final-review") await openAdminPanel("final-review");
+  else if (target === "jobs") await openJobCenter();
+  else if (target === "talent-profile") await openTalentProfilePanel();
+  else if (target === "company-profile") await openCompanyProfilePanel();
+  else if (target === "quality") await openQualityDashboard();
+  else if (target === "knowledge") await openKnowledgePanel();
+  else if (target === "notifications") await openNotificationCenter();
+  else if (target === "governance") await openGovernanceCenter();
+  else if (target === "readiness") await openReadinessCenter();
 }));
 $("sidebar-score-open").addEventListener("click", showEvaluationView);
 $("prep-report-btn").addEventListener("click", (event) => {
