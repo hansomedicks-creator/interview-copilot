@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: interview_copilot
+      POSTGRES_USER: interview_copilot
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - interview-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interview_copilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: ./backend
+    environment:
+      INTERVIEW_ENV: production
+      INTERVIEW_DATABASE_URL: postgresql+psycopg://interview_copilot:change-me@postgres:5432/interview_copilot
+      INTERVIEW_PROVIDER_MODE: mock
+      INTERVIEW_REQUIRE_RECORDING_NOTICE: "true"
+      INTERVIEW_RECORDING_DIR: /data/recordings
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - interview-recordings:/data/recordings
+
+volumes:
+  interview-postgres:
+  interview-recordings:

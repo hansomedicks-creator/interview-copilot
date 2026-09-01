@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/schemas/recruiting-context-1.0.json",
+  "title": "RecruitingContext",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate", "job", "screening"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "source_candidate_id", "display_name", "resume_text"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "source_candidate_id": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "resume_text": { "type": "string" },
+        "resume_asset_url": { "type": ["string", "null"], "format": "uri" }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_job_code", "job_title", "jd_text"],
+      "properties": {
+        "source_job_code": { "type": "string", "minLength": 1 },
+        "job_title": { "type": "string", "minLength": 1 },
+        "jd_text": { "type": "string" },
+        "screening_profile_id": { "type": ["string", "null"] },
+        "screening_profile_version": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "screening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "dimension_scores", "evidence", "needs_human_review", "summary"],
+      "properties": {
+        "tier": { "enum": ["recommend", "maybe", "reject"] },
+        "dimension_scores": { "type": "array", "items": { "type": "object" } },
+        "evidence": { "type": "array", "items": { "type": "object" } },
+        "needs_human_review": { "type": "boolean" },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+}

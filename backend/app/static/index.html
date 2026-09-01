@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Interview Copilot · AI 面试伴侣</title>
+    <link rel="stylesheet" href="/static/styles.css?v=0.5.1-flexible-flow" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">IC</span>
+        <span>Interview Copilot</span>
+        <span class="subtle">面试官侧边台</span>
+      </div>
+      <div class="runtime-badges">
+        <button id="font-toggle" class="font-toggle" type="button" aria-pressed="false">大字模式</button>
+        <span class="user-chip" id="current-user">未登录</span>
+        <button id="logout-btn" class="text-button hidden">退出</button>
+        <span class="status-dot"></span>
+        <span id="api-status">服务检查中</span>
+        <span class="pill warning" id="llm-badge">AI 检查中</span>
+        <span class="pill warning" id="asr-badge">ASR 检查中</span>
+      </div>
+    </header>
+
+    <aside id="app-sidebar" class="app-sidebar hidden" aria-label="主要导航">
+      <nav>
+        <button type="button" class="sidebar-nav active" data-app-nav="home"><span>首页</span><small>我的待办</small></button>
+        <button type="button" class="sidebar-nav" data-app-nav="interviews"><span>面试工作台</span><small>安排与实时辅助</small></button>
+        <button id="sidebar-evaluation-btn" type="button" class="sidebar-nav" data-app-nav="evaluation" disabled><span>本轮评价</span><small id="sidebar-evaluation-label">结束面试后生成</small></button>
+        <button type="button" class="sidebar-nav hr-only hidden" data-app-nav="admin"><span>HR 后台</span><small>岗位、候选人与流程</small></button>
+      </nav>
+      <section id="sidebar-score-summary" class="sidebar-score-summary hidden">
+        <small>AI 本轮参考</small>
+        <strong id="sidebar-score-value">—</strong>
+        <span id="sidebar-score-decision">等待评价</span>
+        <button id="sidebar-score-open" type="button" class="text-button">查看证据与建议</button>
+      </section>
+      <p>证据优先<br />最终决定由人作出</p>
+    </aside>
+
+    <main>
+      <section id="auth-gate" class="auth-gate panel">
+        <div class="auth-brand"><span class="brand-mark large-mark">IC</span><div><span class="kicker">ENTERPRISE SIGN-IN</span><h1>登录 Interview Copilot</h1></div></div>
+        <p>使用飞书账号识别你的组织身份，并自动加载分配给你的面试。HR 与面试官进入后看到不同的工作空间。</p>
+        <a id="feishu-login-btn" class="feishu-login" href="/api/v1/auth/feishu/login">使用飞书登录</a>
+        <div id="oauth-config-note" class="auth-note">正在检查飞书登录配置…</div>
+        <div id="dev-login-panel" class="dev-login hidden"><span>本地开发预览</span><button class="secondary" data-dev-login="dev-admin">以管理员身份预览</button><button class="secondary" data-dev-login="dev-hr">以 HR 身份预览</button><button class="secondary" data-dev-login="dev-business">以面试官身份预览</button></div>
+      </section>
+
+      <section id="welcome" class="home-shell hidden">
+        <div class="welcome-card">
+          <div>
+          <div class="eyebrow">EVIDENCE FIRST · HUMAN DECIDES</div>
+          <h1>让每一次面试，都能回到证据。</h1>
+          <p>
+            面试官从今日安排进入场次，HR 从面试任务开始组织候选人、岗位和岗位级流程。
+            所有评价以可复核证据为基础，最终决定始终由人作出。
+          </p>
+            <div class="welcome-actions">
+              <button id="today-btn" class="primary large">进入我的面试安排</button>
+              <button id="admin-open-btn" class="secondary large hr-only hidden">HR 招聘任务后台</button>
+            </div>
+            <div id="agenda-empty-state" class="agenda-empty-state hidden">
+              <strong>未来 7 天暂时没有分配给你的面试</strong>
+              <span>面试已创建但分配给其他人时，也不会出现在“我的安排”里；HR 可到招聘任务后台核对。</span>
+            </div>
+            <section id="my-action-center" class="my-action-center hidden">
+              <div class="my-action-heading"><div><span class="kicker">MY ACTIONS</span><h2>我的面试待办</h2></div><span id="my-action-summary"></span></div>
+              <div id="my-action-list" class="my-action-list"></div>
+              <small id="my-action-boundary" class="my-action-boundary"></small>
+            </section>
+          </div>
+          <div class="principle-stack">
+            <div><b>01</b><span>标准先行<br /><small>同轮次使用统一能力项</small></span></div>
+            <div><b>02</b><span>原文可追溯<br /><small>评分必须绑定逐字稿</small></span></div>
+            <div><b>03</b><span>人工作决定<br /><small>AI 只生成建议草稿</small></span></div>
+          </div>
+        </div>
+
+        <section id="task-creator" class="task-creator panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">HR WORKBENCH</span><h2>创建面试任务</h2><p>一次录入候选人、岗位和实际面试流程，创建后自动生成每轮标准题库。</p></div>
+            <button id="task-close-btn" class="text-button" type="button">返回首页</button>
+          </div>
+          <form id="task-form">
+            <div class="task-grid">
+              <fieldset>
+                <legend><b>01</b> 候选人资料</legend>
+                <label>候选人姓名<input name="candidate_name" required maxlength="128" placeholder="例如：张三" /></label>
+                <label>导入简历文件 <span class="field-hint">PDF / Word / TXT，最多 10 MB</span><input class="file-input" id="resume-file" type="file" accept=".pdf,.docx,.txt,.md" /></label>
+                <label>简历内容<textarea name="resume_text" required rows="8" placeholder="粘贴简历正文，或从上方文件自动提取"></textarea></label>
+              </fieldset>
+              <fieldset>
+                <legend><b>02</b> 岗位资料</legend>
+                <label>选择已建立岗位<select id="task-job-select" name="job_id" required><option value="">请先选择岗位</option></select></label>
+                <div class="task-job-guidance"><span>新岗位需要先完成 JD，再安排候选人面试。</span><button id="task-job-manage-btn" class="text-button" type="button">前往岗位与 JD</button></div>
+                <label>岗位名称<input name="job_title" required readonly maxlength="128" /></label>
+                <label>岗位编号<input name="source_job_code" readonly maxlength="128" /></label>
+                <label>岗位 JD<textarea name="jd_text" required readonly rows="8"></textarea></label>
+              </fieldset>
+            </div>
+            <div class="schedule-section">
+              <div class="schedule-heading"><div><span class="kicker">03 · INTERVIEW LOOP</span><h3>岗位面试流程</h3></div><span id="task-flow-summary" class="helper">选择需要的轮次，并按实际顺序排列</span></div>
+              <div class="schedule-grid">
+                <article class="schedule-card" data-round-form="business"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用业务面</span></label><span class="round-no">1</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="business_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="business_interviewer" required></select></label><label>时间<input name="business_time" type="datetime-local" required /></label><label>场景<select name="business_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+                <article class="schedule-card" data-round-form="hr"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 HR 面</span></label><span class="round-no">2</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="hr_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="hr_interviewer" required></select></label><label>时间<input name="hr_time" type="datetime-local" required /></label><label>场景<select name="hr_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+                <article class="schedule-card" data-round-form="ceo"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 CEO 面</span></label><span class="round-no">3</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="ceo_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="ceo_interviewer" required></select></label><label>时间<input name="ceo_time" type="datetime-local" required /></label><label>场景<select name="ceo_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+              </div>
+            </div>
+            <div class="task-submit"><span class="helper">本次设置会记为该岗位默认流程；后续轮次会读取此前已确认事实和待验证问题。</span><button id="task-submit-btn" class="primary" type="submit">创建并进入首轮面试</button></div>
+          </form>
+        </section>
+
+        <section id="admin-panel" class="admin-panel panel hidden">
+          <div class="task-header"><div><span class="kicker">HR ADMIN</span><h2>招聘任务后台</h2><p>统一管理候选人的岗位级面试流程、面试官分配和任务状态。</p></div><button id="admin-close-btn" class="text-button">返回首页</button></div>
+          <div class="admin-toolbar admin-toolbar-primary"><button id="admin-job-btn" class="primary">岗位与 JD</button><button id="admin-import-btn" class="secondary">批量导入候选人</button><button id="admin-create-btn" class="secondary">手动创建面试</button><button id="admin-refresh-btn" class="secondary">刷新列表</button></div>
+          <details class="admin-more-tools">
+            <summary>更多后台功能</summary>
+            <div class="admin-toolbar"><button id="admin-readiness-btn" class="secondary">试点就绪中心</button><button id="admin-quality-btn" class="secondary">面试质量分析</button><button id="admin-company-profile-btn" class="secondary">公司基础画像</button><button id="admin-profile-btn" class="secondary">岗位人才画像</button><button id="admin-knowledge-btn" class="secondary">人才知识库</button><button id="admin-notifications-btn" class="secondary">飞书通知中心</button><button id="admin-governance-btn" class="secondary">数据治理与审计</button></div>
+          </details>
+          <section class="admin-action-center">
+            <div class="evaluation-heading"><div><span class="kicker">ACTION CENTER</span><h3>今日行动中心</h3></div><small>只聚合待处理事项，不自动替人作决定</small></div>
+            <div id="admin-action-summary" class="admin-action-summary"></div>
+            <div id="admin-action-list" class="admin-action-list"></div>
+            <small id="admin-action-boundary" class="admin-action-boundary"></small>
+          </section>
+          <div id="admin-task-list" class="admin-task-list"></div>
+        </section>
+
+        <section id="job-center-panel" class="job-center-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">JOB DEFINITION</span><h2>岗位与 JD 管理</h2><p>新岗位从这里开始：先录入并核对 JD，再生成岗位人才画像，最后导入候选人和安排面试。</p></div>
+            <button id="job-center-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div class="job-flow" aria-label="岗位建立流程"><span class="active">1 建立岗位与 JD</span><span>2 生成画像草稿</span><span>3 HR 审核标准</span><span>4 导入候选人</span></div>
+          <div id="job-center-summary" class="job-center-summary"></div>
+          <div class="job-center-layout">
+            <aside class="job-directory">
+              <div class="job-directory-head"><div><span class="kicker">JOB LIST</span><h3>岗位列表</h3></div><button id="job-new-btn" class="primary compact">＋ 新建岗位</button></div>
+              <label class="job-search">搜索岗位<input id="job-search-input" type="search" placeholder="输入岗位名称或编号" /></label>
+              <div id="job-list" class="job-list"></div>
+            </aside>
+            <section class="job-editor-shell">
+              <div id="job-editor-empty" class="empty-state"><strong>选择一个岗位，或新建岗位</strong><span>岗位人才画像不是手工凭空建立，而是由公司标准与这里保存的 JD 生成。</span></div>
+              <form id="job-editor-form" class="job-editor hidden">
+                <div class="job-editor-heading"><div><span id="job-editor-mode" class="kicker">NEW JOB</span><h3 id="job-editor-title">新建岗位</h3></div><span id="job-editor-profile-state" class="pill warning">尚未生成画像</span></div>
+                <div class="job-editor-grid">
+                  <label>岗位名称<input id="job-title-input" maxlength="128" required placeholder="例如：商业化运营经理" /></label>
+                  <label>岗位编号（可选）<input id="job-code-input" maxlength="128" placeholder="例如：OPS-2026-01" /></label>
+                  <label>招聘状态<select id="job-status-input"><option value="active">招聘中</option><option value="paused">暂停招聘</option></select></label>
+                </div>
+                <div class="jd-import-card">
+                  <div><strong>导入 JD 文件</strong><span>支持 PDF、Word、TXT、Markdown，提取后仍需 HR 检查</span></div>
+                  <button id="job-jd-file-btn" class="secondary" type="button">选择文件</button><input id="job-jd-file" class="visually-hidden" type="file" accept=".pdf,.docx,.txt,.md" />
+                </div>
+                <label class="job-jd-label">岗位 JD<textarea id="job-jd-input" rows="16" required minlength="20" placeholder="请粘贴岗位职责、任职要求、关键目标和协作关系，或从上方文件自动提取"></textarea></label>
+                <div class="jd-quality-row"><span id="job-jd-count">0 个字符</span><span>建议至少包含：岗位职责、任职要求、关键目标、汇报或协作关系</span></div>
+                <section id="job-semantic-summary" class="job-semantic-summary hidden" aria-live="polite">
+                  <div class="job-semantic-heading"><div><span class="kicker">JD UNDERSTANDING</span><h4>系统对岗位的理解</h4></div><span id="job-semantic-mode" class="pill warning">待分析</span></div>
+                  <p id="job-semantic-mission"></p>
+                  <div class="job-semantic-grid"><div><strong>要形成的业务结果</strong><div id="job-semantic-outcomes" class="semantic-chip-list"></div></div><div><strong>分轮验证维度</strong><div id="job-semantic-dimensions" class="semantic-chip-list"></div></div></div>
+                  <div id="job-semantic-exclusions" class="semantic-exclusions hidden"></div>
+                </section>
+                <div class="knowledge-boundary"><strong>生成逻辑</strong><span>保存后，系统会先理解完整 JD 的岗位使命、业务结果和真实场景，再按业务面 / HR 面 / CEO 面生成证据型问题；不会把某个关键词直接当作能力，也不会自动改变录用标准。</span></div>
+                <div class="job-editor-actions">
+                  <button id="job-save-btn" class="primary" type="submit">保存 JD、理解岗位并生成画像草稿</button>
+                  <button id="job-open-profile-btn" class="secondary" type="button" disabled>查看画像草稿</button>
+                  <button id="job-import-candidates-btn" class="secondary" type="button" disabled>为该岗位导入候选人</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="readiness-panel" class="readiness-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">PILOT READINESS</span><h2>系统配置与试点就绪中心</h2><p>统一检查真实面试所需的身份、语音、模型、存储和上线基础；本页面不保存或回显任何密钥。</p></div>
+            <button id="readiness-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <section id="readiness-hero" class="readiness-hero"></section>
+          <div id="readiness-summary" class="readiness-summary"></div>
+          <div class="readiness-toolbar"><button id="readiness-refresh-btn" class="secondary">重新检查</button><span id="readiness-role-note" class="helper"></span></div>
+          <div class="readiness-boundary"><strong>安全边界</strong><span>密钥只保存在服务器；连接测试不发送候选人简历、录音或逐字稿，也不会自动修改任何配置。</span></div>
+          <section class="readiness-actions-section">
+            <div class="evaluation-heading"><div><span class="kicker">NEXT ACTIONS</span><h3>优先处理事项</h3></div><small>先处理阻断项，再处理效率增强项</small></div>
+            <div id="readiness-actions" class="readiness-actions"></div>
+          </section>
+          <div id="readiness-checks" class="readiness-checks"></div>
+        </section>
+
+        <section id="quality-dashboard-panel" class="quality-dashboard-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">INTERVIEW QUALITY</span><h2>面试质量分析</h2><p>把“岗位一直招不到人”拆成样本、面试过程和招聘结果三层观察，先定位问题，再决定是否辅导。</p></div>
+            <button id="quality-dashboard-close" class="text-button">返回招聘后台</button>
+          </div>
+          <div class="quality-dashboard-toolbar"><label>查看范围<select id="quality-job-select"><option value="">全部岗位</option></select></label><button id="quality-dashboard-refresh" class="secondary">刷新分析</button></div>
+          <div id="quality-dashboard-summary" class="quality-dashboard-summary"></div>
+          <div class="knowledge-boundary"><strong>使用边界</strong><span>先看样本量，再看流程异常，最后结合岗位招聘结果。指标只用于发现辅导机会，不单独作为面试官绩效、晋升或淘汰依据。</span></div>
+          <section class="quality-dashboard-section">
+            <div class="evaluation-heading"><div><span class="kicker">INTERVIEWERS</span><h3>面试官趋势</h3></div><small>少于 3 场只展示观察，不下趋势结论</small></div>
+            <div id="quality-interviewer-list" class="quality-interviewer-list"></div>
+          </section>
+          <section class="quality-dashboard-section">
+            <div class="evaluation-heading"><div><span class="kicker">JOB DIAGNOSIS</span><h3>岗位招聘诊断</h3></div><small>区分面试流程、岗位标准与候选人供给</small></div>
+            <div id="quality-job-list" class="quality-job-list"></div>
+          </section>
+        </section>
+
+        <section id="knowledge-panel" class="knowledge-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">KNOWLEDGE GOVERNANCE</span><h2>人才知识库</h2><p>AI 负责形成提案，HR 负责审批；只有发布成功的内容才进入 Obsidian 正式知识库。</p></div>
+            <button id="knowledge-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div id="knowledge-status" class="knowledge-status"></div>
+          <div class="knowledge-toolbar">
+            <button id="knowledge-refresh-btn" class="secondary">刷新提案</button>
+            <a id="knowledge-open-vault" class="secondary link-button hidden" href="#">在 Obsidian 中打开</a>
+          </div>
+          <div class="knowledge-boundary"><strong>发布边界</strong><span>简历、录音、逐字稿、联系方式和候选人姓名不会写入 Vault。疑似个人信息会自动阻止发布。</span></div>
+          <section class="system-docs-panel">
+            <div class="evaluation-heading"><div><span class="kicker">SYSTEM DOCUMENTATION</span><h3>系统使用与运维文档</h3></div><small>独立于人才知识，不参与候选人分析</small></div>
+            <div id="system-docs-status" class="system-docs-status"></div>
+            <div id="system-docs-list" class="system-docs-list"></div>
+            <div class="system-docs-actions"><label><input id="system-docs-confirm" type="checkbox" />我确认将项目内的系统说明同步到 Obsidian，并保持不参与面试知识检索。</label><button id="system-docs-sync-btn" class="primary" disabled>同步系统文档</button><a id="system-docs-open" class="secondary link-button hidden" href="#">在 Obsidian 查看</a></div>
+          </section>
+          <div id="knowledge-proposals" class="knowledge-proposals"></div>
+        </section>
+
+        <section id="company-profile-panel" class="company-profile-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">COMPANY TALENT FOUNDATION</span><h2>公司基础人才画像版本中心</h2><p>先定义全公司共同认可的可观察行为，再由岗位画像和各轮面试继承；不定义候选人的个人背景。</p></div>
+            <button id="company-profile-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div id="company-profile-status" class="profile-status"></div>
+          <div class="company-profile-path"><strong>标准继承路径</strong><span>公司基础画像 → 岗位人才画像 → 业务面 / HR 面 / CEO 面 → 证据评价</span></div>
+          <div class="knowledge-boundary"><strong>公平边界</strong><span>只设置与工作成功有关的可观察行为，不使用性别、年龄、婚育、籍贯、名校或知名公司经历代替能力证据。</span></div>
+
+          <form id="company-profile-form" class="company-profile-form">
+            <div class="company-profile-basics">
+              <label>公司名称<input id="company-profile-name" maxlength="128" required placeholder="例如：XX科技" /></label>
+              <label>画像用途说明<textarea id="company-profile-purpose" rows="3" required placeholder="说明这套公司通用标准希望解决什么问题"></textarea></label>
+              <label>公司级红线 <span class="field-hint">每行一条</span><textarea id="company-profile-red-lines" rows="4" placeholder="例如：伪造影响任职判断的关键信息"></textarea></label>
+              <label>本次版本说明<textarea id="company-profile-change-summary" rows="3" required placeholder="例如：根据 HR 用人原则建立首版公司基础画像"></textarea></label>
+            </div>
+            <div class="company-competency-heading"><div><span class="kicker">OBSERVABLE BEHAVIOR</span><h3>公司通用能力</h3><p>建议 5–7 项。每项都要写清“什么行为算证据、什么表现是风险、由哪一轮主要验证”。</p></div><button id="company-competency-add" class="secondary" type="button">＋ 添加能力</button></div>
+            <div id="company-competency-list" class="company-competency-list"></div>
+            <div class="company-profile-save"><span class="helper">保存只会形成待审核草稿；不会立即改变题库、评分或岗位画像。</span><button class="primary" type="submit">保存公司画像草稿</button></div>
+          </form>
+          <section class="company-version-section">
+            <div class="evaluation-heading"><div><span class="kicker">VERSION GOVERNANCE</span><h3>生效与版本记录</h3></div><small>旧版本保留，已完成面试不会被改写</small></div>
+            <div id="company-profile-versions" class="profile-content"></div>
+          </section>
+        </section>
+
+        <section id="talent-profile-panel" class="talent-profile-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">PROFILE GOVERNANCE</span><h2>岗位人才画像版本中心</h2><p>画像定义岗位成功证据，不定义候选人的个人背景。所有版本均由 HR 审核后生效。</p></div>
+            <button id="profile-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div class="profile-toolbar">
+            <label>选择岗位<select id="profile-job-select"></select></label>
+            <button id="profile-generate-btn" class="primary">生成 / 刷新画像草稿</button>
+            <button id="profile-history-import-btn" class="secondary">导入北森历史样本</button>
+            <input id="profile-history-file" class="visually-hidden" type="file" accept=".xlsx,.csv" />
+            <a class="secondary link-button" href="/api/v1/admin/historical-samples/template.csv" download>下载导入模板</a>
+            <button id="profile-refresh-btn" class="secondary">刷新</button>
+          </div>
+          <div id="profile-status" class="profile-status"></div>
+          <div class="knowledge-boundary"><strong>样本边界</strong><span>首版来自 JD 与分轮标准能力；后续版本至少需要 3 份有效录用或历史成功样本。试用期通过属于更强验证信号，所有版本仍须 HR 审核。</span></div>
+          <section id="historical-import-review" class="historical-import-review hidden">
+            <div class="evaluation-heading"><div><span class="kicker">DE-IDENTIFIED PREVIEW</span><h3>历史样本脱敏预览</h3></div><button id="historical-import-cancel" class="text-button">取消导入</button></div>
+            <div id="historical-import-summary" class="import-summary"></div>
+            <div id="historical-import-mapping" class="historical-import-mapping"></div>
+            <div class="import-boundary"><strong>隐私边界</strong><span id="historical-import-privacy"></span></div>
+            <div class="historical-table-wrap"><table class="historical-table"><thead><tr><th><input id="historical-select-all" type="checkbox" checked aria-label="全选有效样本" /></th><th>匿名记录</th><th>招聘结果</th><th>识别到的能力信号</th><th>质量提醒</th></tr></thead><tbody id="historical-import-rows"></tbody></table></div>
+            <div class="import-actions"><span class="helper">默认只勾选结果明确且有能力信号的成功样本；确认后只保存结构化字段。</span><button id="historical-import-commit" class="primary">确认所选并更新画像草稿</button></div>
+          </section>
+          <div id="profile-content" class="profile-content"></div>
+        </section>
+
+        <section id="governance-panel" class="governance-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">DATA GOVERNANCE</span><h2>数据治理与审计</h2><p>到期材料先预览、再由 HR 明确确认清理；系统不静默删除，也不改变候选人的评分和流程决定。</p></div>
+            <button id="governance-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div class="governance-toolbar"><button id="governance-refresh-btn" class="secondary">刷新到期清单</button><span id="governance-policy-hint" class="helper"></span></div>
+          <div id="governance-summary" class="governance-summary"></div>
+          <div class="governance-boundary"><div><strong>清理什么</strong><span id="governance-delete-scope"></span></div><div><strong>保留什么</strong><span id="governance-preserve-scope"></span></div></div>
+          <section class="governance-section">
+            <div class="evaluation-heading"><div><span class="kicker">RETENTION QUEUE</span><h3>到期与临期材料</h3></div><small>默认只勾选已经到期、可以清理的记录</small></div>
+            <div id="governance-items" class="governance-items"></div>
+            <div class="governance-confirm-box">
+              <label><input id="governance-confirm" type="checkbox" />我已核对以上候选人与期限，确认仅清理已到期的敏感原始材料。</label>
+              <button id="governance-cleanup-btn" class="danger" disabled>确认清理所选到期材料</button>
+            </div>
+          </section>
+          <section class="governance-section">
+            <div class="evaluation-heading"><div><span class="kicker">AUDIT TRAIL</span><h3>最近操作记录</h3></div><small>记录谁在何时做了什么，不保存逐字稿内容</small></div>
+            <div id="governance-audit-list" class="governance-audit-list"></div>
+          </section>
+        </section>
+
+        <section id="notification-panel" class="notification-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">FEISHU COLLABORATION</span><h2>飞书通知中心</h2><p>系统先生成通知草稿，HR 核对收件人和内容后再发送；未配置飞书消息权限时只提供预览，不会误发。</p></div>
+            <button id="notification-close-btn" class="text-button">返回招聘后台</button>
+          </div>
+          <div class="notification-toolbar"><button id="notification-sync-btn" class="primary">刷新通知队列</button><button id="notification-refresh-btn" class="secondary">刷新状态</button><span id="notification-integration-status" class="pill warning">飞书消息未配置</span></div>
+          <div id="notification-summary" class="notification-summary"></div>
+          <div class="notification-boundary"><strong>发送边界</strong><span>不会发送逐字稿、录音、评分或录用建议。每条消息只包含候选人、岗位、轮次、时间和待办动作；发送前必须由 HR 再次确认。</span></div>
+          <section class="notification-section">
+            <div class="evaluation-heading"><div><span class="kicker">OUTBOX</span><h3>通知草稿与待发送队列</h3></div><small>默认勾选当前已到发送时间的消息</small></div>
+            <div id="notification-items" class="notification-items"></div>
+            <div class="notification-confirm-box">
+              <label><input id="notification-confirm" type="checkbox" />我已核对收件人、发送时间和消息内容，确认发送所选飞书通知。</label>
+              <button id="notification-send-btn" class="primary" disabled>发送所选通知</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="final-review-panel" class="final-review-panel panel hidden">
+          <div class="task-header">
+            <div><span class="kicker">INTERVIEW FLOW REVIEW</span><h2 id="final-review-title">岗位面试汇总</h2><p id="final-review-subtitle">汇总实际配置轮次的证据、人工评价和遗留问题，由 HR 作出最终流程决定。</p></div>
+            <div class="task-header-actions"><button id="final-report-open-btn" class="primary">生成 / 查看报告</button><button id="final-review-close-btn" class="text-button">返回招聘后台</button></div>
+          </div>
+          <div id="final-readiness" class="final-readiness"></div>
+          <section class="final-section">
+            <div class="evaluation-heading"><div><span class="kicker">ALL DIALOGUE AI REVIEW</span><h3>全部轮次对话综合参考</h3></div><small>分轮评价、等权汇总，不要求面试官照题库提问</small></div>
+            <div id="final-ai-dialogue-summary" class="final-ai-dialogue-summary"></div>
+          </section>
+          <section class="final-section">
+            <div class="evaluation-heading"><div><span class="kicker">INTERVIEW LOOP</span><h3>岗位流程完成情况</h3></div><small>录音与逐字稿按实际轮次留档</small></div>
+            <div id="final-rounds" class="final-rounds"></div>
+          </section>
+          <section class="final-section final-two-column">
+            <div>
+              <div class="evaluation-heading"><div><span class="kicker">HUMAN SCORES</span><h3>人工确认能力项</h3></div></div>
+              <div id="final-competencies" class="final-competencies"></div>
+            </div>
+            <div>
+              <div class="evaluation-heading"><div><span class="kicker">OPEN QUESTIONS</span><h3>仍需验证的问题</h3></div></div>
+              <div id="final-open-questions" class="final-open-questions"></div>
+            </div>
+          </section>
+          <form id="final-decision-form" class="final-decision-form">
+            <div class="evaluation-heading"><div><span class="kicker">HR DECISION</span><h3>HR 最终流程决定</h3></div><small>这是人工操作，不由 AI 自动执行</small></div>
+            <label>流程决定
+              <select id="final-decision" required>
+                <option value="">请选择</option>
+                <option value="offer_approval">进入录用审批</option>
+                <option value="supplementary_interview">安排补充面试</option>
+                <option value="hold">暂缓决定</option>
+                <option value="reject">不录用并关闭流程</option>
+              </select>
+            </label>
+            <label>决定依据
+              <textarea id="final-decision-notes" rows="4" required minlength="5" placeholder="请引用各轮面试中的关键证据、分歧和风险，不要只写主观印象"></textarea>
+            </label>
+            <label class="final-confirm"><input id="final-decision-confirm" type="checkbox" />我确认这是 HR 的人工决定，并理解它会变更候选人阶段。</label>
+            <button class="primary" type="submit">确认并变更阶段</button>
+          </form>
+        </section>
+
+        <section id="report-panel" class="report-panel panel hidden">
+          <div class="task-header report-header">
+            <div><span class="kicker">VERSIONED INTERVIEW REPORT</span><h2 id="report-title">岗位面试报告</h2><p id="report-subtitle">管理层摘要与 HR 完整档案共用同一证据快照，但内部治理信息严格隔离。</p></div>
+            <button id="report-close-btn" class="text-button">返回面试汇总</button>
+          </div>
+          <div id="report-toolbar" class="report-toolbar">
+            <label>报告版本<select id="report-version-select"></select></label>
+            <label>查看版本<select id="report-audience-select"><option value="management">管理层摘要</option><option value="hr_archive">HR 完整档案</option></select></label>
+            <button id="report-refresh-btn" class="secondary">重新生成草稿</button>
+            <label id="report-lock-confirm-wrap" class="report-lock-confirm"><input id="report-lock-confirm" type="checkbox" />我确认当前内容可锁定</label>
+            <button id="report-lock-btn" class="primary">锁定版本</button>
+            <button id="report-copy-link-btn" class="secondary">复制内部链接</button>
+            <a id="report-print-link" class="secondary link-button" target="_blank">打印 / 保存 PDF</a>
+          </div>
+          <div id="report-status-strip" class="report-status-strip"></div>
+          <article id="report-document" class="report-document"></article>
+        </section>
+
+        <section id="resume-import-panel" class="resume-import-panel panel hidden">
+          <div class="task-header"><div><span class="kicker">RESUME IMPORT</span><h2>批量导入面试候选人</h2><p>这里的候选人已经通过筛选。本页只识别资料、人工校对和建立面试档案，不做排序或淘汰。</p></div><button id="resume-import-close-btn" class="text-button">返回招聘后台</button></div>
+          <div class="import-steps" aria-label="导入步骤"><span class="active">1 选择岗位</span><span>2 上传简历</span><span>3 校对信息</span><span>4 进入待排期</span></div>
+          <section id="import-setup" class="import-setup">
+            <div class="import-job-card">
+              <label>面试岗位<select id="import-job-select"><option value="">请选择已建立岗位</option></select></label>
+              <div class="import-job-guidance"><span>候选人导入前，需要先建立岗位与 JD。</span><button id="import-create-job-btn" class="text-button" type="button">去新建岗位</button></div>
+              <div id="import-job-context" class="import-job-context">选择岗位后，这里会显示 JD 和画像状态。</div>
+            </div>
+            <label id="resume-dropzone" class="resume-dropzone">
+              <input id="resume-batch-files" type="file" multiple accept=".pdf,.docx,.txt,.md" />
+              <strong>把多份简历拖到这里，或点击选择文件</strong>
+              <span>支持 PDF、Word、TXT、Markdown；单份最多 10 MB，建议一次不超过 50 份</span>
+            </label>
+          </section>
+          <div id="import-progress" class="import-progress hidden"><div><strong id="import-progress-title">正在识别</strong><span id="import-progress-detail">0 / 0</span></div><progress id="import-progress-bar" value="0" max="1"></progress></div>
+          <section id="import-review" class="import-review hidden">
+            <div class="import-summary"><div><small>已选择</small><strong id="import-selected-count">0</strong></div><div><small>识别成功</small><strong id="import-success-count">0</strong></div><div><small>需要核对</small><strong id="import-review-count">0</strong></div><div><small>重复提醒</small><strong id="import-duplicate-count">0</strong></div></div>
+            <div class="import-boundary"><strong>系统边界</strong><span>重复、缺字段和低置信度都只是提醒，不影响候选人参加面试。HR 确认后才会正式建档。</span></div>
+            <div class="resume-table-wrap"><table class="resume-table"><thead><tr><th><input id="import-select-all" type="checkbox" checked aria-label="全选" /></th><th>文件与状态</th><th>姓名 *</th><th>联系方式</th><th>工作年限 / 学历</th><th>当前公司 / 职位</th><th>识别依据</th><th>操作</th></tr></thead><tbody id="resume-import-rows"></tbody></table></div>
+            <div class="import-actions"><span class="helper">确认后进入“待安排面试”，不会自动创建轮次和时间。</span><button id="import-commit-btn" class="primary">确认所选并进入待排期</button></div>
+          </section>
+        </section>
+      </section>
+
+      <section id="workspace" class="workspace hidden">
+        <section class="today-panel panel">
+          <div class="today-heading">
+            <div><span class="kicker">MY AGENDA</span><h3>我的面试安排 · 未来 7 天</h3></div>
+            <div class="today-actions"><span class="helper">从面试安排自动识别候选人、岗位与本轮标准</span><button id="workspace-task-btn" class="secondary compact hr-only hidden">招聘任务后台</button></div>
+          </div>
+          <div id="today-list" class="today-list"></div>
+        </section>
+
+        <div class="context-bar">
+          <div>
+            <div class="eyebrow">当前候选人</div>
+            <h2 id="candidate-name">—</h2>
+          </div>
+          <div class="context-detail"><span>岗位</span><strong id="job-title">—</strong></div>
+          <div class="context-detail"><span>场景</span><strong id="meeting-source">—</strong></div>
+          <div class="context-detail system-route"><span>当前面试轮次</span><strong id="system-route">—</strong><small id="route-reason">—</small></div>
+          <div class="round-tabs" id="round-tabs"></div>
+          <div class="session-state" id="session-state">待准备</div>
+        </div>
+
+        <section id="preparation-brief" class="preparation-brief panel">
+          <div class="prep-heading"><div><span class="kicker">PRE-INTERVIEW BRIEF</span><h3>面试前准备包</h3></div><div class="prep-heading-actions"><button id="prep-report-btn" class="secondary compact hidden">查看锁定汇总报告</button><span id="prep-status" class="pill">正在生成</span></div></div>
+          <div class="prep-grid">
+            <div><small>简历已识别事实</small><div id="prep-facts" class="prep-chips"></div></div>
+            <div><small>岗位重点</small><div id="prep-focus" class="prep-chips"></div></div>
+            <div><small>前轮带入</small><strong id="prep-prior">首轮面试，暂无前轮信息</strong></div>
+          </div>
+          <details id="prep-prior-detail" class="prep-prior-detail hidden">
+            <summary>查看前轮已确认材料</summary>
+            <div id="prep-prior-content" class="prep-prior-content"></div>
+          </details>
+          <p id="prep-boundary" class="prep-boundary">仅用于生成核实性问题，不代表候选人已具备或不具备相关能力。</p>
+        </section>
+
+        <div id="notice-gate" class="notice-gate">
+          <div>
+            <strong>开始前必须完成候选人告知</strong>
+            <p>已明确告知本次面试会记录、转写并由 AI 生成辅助建议，最终决定由人工作出。</p>
+          </div>
+          <label class="check-row">
+            <input id="notice-check" type="checkbox" />
+            <span>我确认已完成告知</span>
+          </label>
+          <button id="notice-btn" class="secondary">确认告知</button>
+        </div>
+
+        <div class="action-row">
+          <button id="start-btn" class="primary" disabled>开始面试</button>
+          <button id="end-btn" class="danger" disabled>结束并生成评价</button>
+          <span class="helper" id="mode-hint">麦克风真实收音 · ASR 状态检查中 · 文字输入可作降级测试</span>
+        </div>
+
+        <section class="audio-console panel">
+          <div class="audio-identity">
+            <span class="mic-icon" id="mic-icon">●</span>
+            <div>
+              <span class="kicker">MICROPHONE INPUT</span>
+              <h3 id="mic-state">麦克风未开启</h3>
+            </div>
+          </div>
+          <div class="audio-meter" aria-label="实时麦克风音量">
+            <i id="audio-level"></i>
+          </div>
+          <div class="audio-metrics">
+            <span><small>输入格式</small><strong>PCM · 16kHz · Mono</strong></span>
+            <span><small>已收音</small><strong id="audio-duration">00:00</strong></span>
+            <span><small>管线</small><strong id="audio-pipeline">等待连接</strong></span>
+          </div>
+          <div class="audio-actions">
+            <button id="mic-start-btn" class="secondary" disabled>开启麦克风</button>
+            <button id="mic-stop-btn" class="danger" disabled>停止收音</button>
+          </div>
+        </section>
+        <div id="asr-boundary" class="asr-boundary">
+          <strong id="asr-boundary-title">正在检查实时 ASR 配置。</strong>
+          <span id="asr-boundary-detail">麦克风录音与手动逐字稿仍可独立工作。</span>
+        </div>
+
+        <div class="console-grid">
+          <aside id="question-panel" class="panel plan-panel">
+            <div class="panel-heading">
+              <div><span class="kicker">STANDARD + OPTIONAL</span><h3>建议提问</h3></div>
+              <span class="count" id="question-count">0</span>
+            </div>
+            <div class="required-summary">
+              <strong>本轮统一必问题</strong>
+              <span id="required-progress">0 / 0 已完成</span>
+              <small id="question-mix" class="question-mix">正在整理本轮题目结构…</small>
+              <div class="bar"><i id="required-progress-bar" style="width:0%"></i></div>
+            </div>
+            <div id="question-list" class="question-list"></div>
+            <div class="guardrail">
+              <strong>本轮独立判断</strong>
+              <p>前轮只展示已确认事实与待验证问题，不展示分数和录用建议，降低锚定。</p>
+            </div>
+          </aside>
+
+          <section class="panel transcript-panel">
+            <div class="panel-heading">
+              <div><span class="kicker">LIVE</span><h3>实时逐字稿</h3></div>
+              <span id="ws-state" class="connection">未连接</span>
+            </div>
+            <div id="transcript-empty" class="empty-state">
+              <div class="wave-icon"><i></i><i></i><i></i><i></i><i></i></div>
+              <strong>等待面试开始</strong>
+              <span>稳定逐字稿会出现在这里</span>
+            </div>
+            <div id="transcript-list" class="transcript-list"></div>
+            <div id="interim-transcript" class="interim-transcript hidden">
+              <span id="interim-speaker">识别中</span><p id="interim-text"></p>
+            </div>
+            <section id="speaker-mapping-panel" class="speaker-mapping-panel hidden">
+              <div class="speaker-mapping-heading">
+                <div><strong>说话人识别</strong><small>系统自动判断；不确定时才需要点选</small></div>
+                <span>一次纠正，全场回标</span>
+              </div>
+              <div id="speaker-mapping-list" class="speaker-mapping-list"></div>
+            </section>
+            <div class="composer">
+              <div class="composer-top">
+                <select id="speaker-select">
+                  <option value="candidate">候选人</option>
+                  <option value="interviewer">面试官</option>
+                </select>
+                <button id="sample-btn" class="text-button" disabled>填入示例回答</button>
+              </div>
+              <textarea id="transcript-input" rows="3" placeholder="输入一段稳定逐字稿，用于模拟 ASR 事件…" disabled></textarea>
+              <div class="composer-bottom">
+                <span>Enter 发送 · Shift + Enter 换行</span>
+                <button id="send-btn" class="primary compact" disabled>发送片段</button>
+              </div>
+            </div>
+          </section>
+
+          <aside class="analysis-column">
+            <section id="analysis-panel" class="panel analysis-panel">
+              <div class="panel-heading">
+                <div><span class="kicker">COVERAGE</span><h3>能力覆盖</h3></div>
+                <span id="coverage-ratio" class="count">0/0</span>
+              </div>
+              <div id="coverage-list" class="coverage-list"></div>
+              <div class="question-coverage-heading">
+                <div><span class="kicker">QUESTION EVIDENCE</span><strong>问题回答质量</strong></div>
+                <span id="question-coverage-ratio" class="count">0/0</span>
+              </div>
+              <div id="question-coverage-list" class="question-coverage-list"></div>
+            </section>
+
+            <section class="panel suggestion-panel">
+              <div class="panel-heading">
+                <div><span class="kicker">NEXT BEST QUESTION</span><h3>追问建议</h3></div><span id="suggestion-history-count" class="count">0</span>
+              </div>
+              <div id="urgent-followup" class="urgent-followup hidden" role="alert" aria-live="assertive">
+                <strong>回答较浅，建议现在追问</strong><small id="urgent-followup-source"></small><p id="urgent-followup-question"></p><small id="urgent-followup-reason"></small>
+              </div>
+              <div id="suggestion-list" class="suggestion-list">
+                <p class="muted">开始后根据证据缺口生成。</p>
+              </div>
+            </section>
+
+            <section class="panel evidence-panel">
+              <div class="panel-heading">
+                <div><span class="kicker">DECISION FACTS</span><h3>关键事实与未知项</h3></div>
+                <span id="evidence-count" class="count">0</span>
+              </div>
+              <div id="evidence-list" class="evidence-list">
+                <p class="muted">候选人回答后，AI 会合并相近原话并标明来源问题。</p>
+              </div>
+            </section>
+          </aside>
+        </div>
+
+        <section id="scorecard" class="scorecard hidden">
+          <div class="scorecard-heading">
+            <div><span class="kicker">AFTER</span><h2>证据优先评价草稿</h2></div>
+            <div class="scorecard-heading-actions"><button id="scorecard-refresh-btn" type="button" class="secondary compact">重新生成 AI 评价</button><span class="pill warning" id="scorecard-status">需人工复核</span></div>
+          </div>
+          <div id="recommendation" class="recommendation"></div>
+          <section id="answer-logic-section" class="answer-logic-section hidden">
+            <div class="evaluation-heading">
+              <div><span class="kicker">ANSWER LOGIC</span><h3>回答逻辑与一致性核验</h3></div>
+              <small>检查矛盾与待核实说法，不做测谎</small>
+            </div>
+            <div id="answer-logic-review"></div>
+          </section>
+          <div id="question-evidence-summary" class="question-evidence-summary"></div>
+          <section id="jd-evaluation-section" class="evaluation-section">
+            <div class="evaluation-heading"><div><span class="kicker">JD VERIFICATION</span><h3>岗位重点验证</h3></div><small>未验证不等于不符合</small></div>
+            <div id="jd-assessment-list" class="jd-assessment-list"></div>
+          </section>
+          <div id="competency-score-heading" class="evaluation-heading"><div><span class="kicker">COMPETENCY SCORE</span><h3>能力项评分与人工复核</h3></div><small>AI 先按证据评分；面试官核对后确认</small></div>
+          <div id="score-grid" class="score-grid"></div>
+          <div id="next-round" class="next-round"></div>
+          <div id="knowledge-learning" class="knowledge-learning"></div>
+          <form id="scorecard-submit-form" class="scorecard-submit-form">
+            <div class="evaluation-heading"><div><span class="kicker">HUMAN DECISION</span><h3>面试官最终评价</h3></div><small>提交后不会自动变更候选人阶段</small></div>
+            <label>本轮建议
+              <select id="human-decision" required>
+                <option value="">请选择</option>
+                <option value="advance">建议进入下一轮</option>
+                <option value="supplementary_interview">补充面试后再判断</option>
+                <option value="hold">保留讨论</option>
+                <option value="reject">不建议进入下一轮</option>
+              </select>
+            </label>
+            <label>评价说明
+              <textarea id="scorecard-notes" rows="3" placeholder="请写明支持结论的证据、仍存在的疑点，以及下一轮需要确认的内容"></textarea>
+            </label>
+            <button class="primary" type="submit">提交人工评价</button>
+          </form>
+        </section>
+
+        <section id="interviewer-review" class="scorecard hidden">
+          <div class="scorecard-heading">
+            <div><span class="kicker">INTERVIEW QUALITY</span><h2>面试质量复盘</h2></div>
+            <span class="pill warning" id="review-status">待招聘负责人复核</span>
+          </div>
+          <p class="review-intro">以下分数由 AI 根据统一问题覆盖、倾听比例、证据产出和公平性信号自动生成。招聘负责人只需复核，不要求面试官给自己打分。</p>
+          <div id="interviewer-metrics" class="quality-metrics"></div>
+          <form id="interviewer-review-form" class="review-form">
+            <textarea id="review-notes" rows="3" placeholder="招聘负责人可补充上下文或对 AI 复盘的修正意见（选填）"></textarea>
+            <button class="primary" type="submit">确认已阅读 AI 质量复盘</button>
+          </form>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js?v=0.9.0-sidebar-live-followup" defer></script>
+  </body>
+</html>

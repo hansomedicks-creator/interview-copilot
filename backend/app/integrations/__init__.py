@@ -1,0 +1,2 @@
+"""External system adapter boundaries."""
+
