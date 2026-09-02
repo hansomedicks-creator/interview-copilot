@@ -320,6 +320,114 @@ def test_jd_revision_refreshes_only_future_interviews_and_can_be_activated(tmp_p
         assert activated.json()["source_mode"] == "jd_revision"
 
 
+def test_job_recruitment_lifecycle_blocks_new_activity_without_touching_history(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/admin/jobs",
+            json={
+                "title": "生命周期测试岗位",
+                "source_job_code": "LIFECYCLE-001",
+                "status": "active",
+                "jd_text": "负责业务交付、跨团队协作和关键结果复盘，能够独立推进复杂项目。",
+            },
+        ).json()["job"]
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+        task_payload = {
+            "job_id": created["id"],
+            "candidate_name": "历史候选人",
+            "resume_text": "有复杂项目交付经验。",
+            "job_title": created["title"],
+            "jd_text": created["jd_text"],
+            "rounds": [
+                {"round_type": "business", "interviewer_names": ["业务负责人"], "scheduled_at": start.isoformat()},
+            ],
+        }
+        task = client.post("/api/v1/interview-tasks", json=task_payload)
+        assert task.status_code == 201
+
+        paused = client.patch(
+            f"/api/v1/admin/jobs/{created['id']}/status",
+            json={"status": "paused"},
+        )
+        assert paused.status_code == 200
+        assert paused.json()["job"]["recruitment_status"] == "paused"
+        assert paused.json()["job"]["application_count"] == 1
+
+        blocked_task = client.post(
+            "/api/v1/interview-tasks",
+            json={**task_payload, "candidate_name": "不应新增候选人", "rounds": [
+                {"round_type": "business", "interviewer_names": ["业务负责人"], "scheduled_at": (start + timedelta(days=1)).isoformat()},
+            ]},
+        )
+        assert blocked_task.status_code == 409
+        assert "暂停招聘" in blocked_task.json()["detail"]
+
+        resumed = client.patch(
+            f"/api/v1/admin/jobs/{created['id']}/status",
+            json={"status": "active"},
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["job"]["recruitment_status"] == "active"
+
+        closed = client.patch(
+            f"/api/v1/admin/jobs/{created['id']}/status",
+            json={"status": "closed"},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["job"]["application_count"] == 1
+        assert client.patch(
+            f"/api/v1/admin/jobs/{created['id']}/status",
+            json={"status": "paused"},
+        ).status_code == 409
+
+        blocked_import = client.post(
+            "/api/v1/admin/resume-imports",
+            json={"job_id": created["id"]},
+        )
+        assert blocked_import.status_code == 409
+        assert "已关闭招聘" in blocked_import.json()["detail"]
+
+        reopened = client.patch(
+            f"/api/v1/admin/jobs/{created['id']}/status",
+            json={"status": "active"},
+        )
+        assert reopened.status_code == 200
+        batch = client.post(
+            "/api/v1/admin/resume-imports",
+            json={"job_id": created["id"]},
+        )
+        assert batch.status_code == 201
+
+
+def test_talent_profile_draft_can_be_edited_without_changing_active_version(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/admin/jobs",
+            json={
+                "title": "画像编辑测试岗位",
+                "source_job_code": "PROFILE-EDIT-001",
+                "status": "active",
+                "jd_text": "负责业务分析、方案落地和跨部门沟通，要求能够独立拆解问题并持续复盘。",
+            },
+        ).json()
+        job = created["job"]
+        draft = created["talent_profile_draft"]
+        edited = dict(draft["profile_payload"])
+        edited["summary"] = "能够亲自拆解问题、推进落地并对关键业务结果负责。"
+        edited["success_outcomes"] = ["独立完成从问题定义到方案落地的闭环"]
+        saved = client.put(
+            f"/api/v1/admin/jobs/{job['id']}/talent-profile/draft",
+            json={"profile_payload": edited, "change_summary": "补充亲自负责与落地闭环的判断标准"},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["status"] == "draft"
+        assert saved.json()["profile_payload"]["summary"].startswith("能够亲自拆解")
+        center = client.get(f"/api/v1/admin/jobs/{job['id']}/talent-profile").json()
+        assert center["active_version"] is None
+        assert center["draft_version"]["profile_payload"]["summary"].startswith("能够亲自拆解")
+        assert center["draft_version"]["evidence_summary"]["manual_edit"] is True
+
+
 def test_hr_can_batch_recognize_and_import_interview_candidates(tmp_path):
     with make_client(tmp_path) as client:
         batch = client.post(

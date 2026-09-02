@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.0.5-task-menu-clipping" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.1.0-job-lifecycle" />
   </head>
   <body>
     <header class="topbar">
@@ -167,7 +167,7 @@
             <div><span class="kicker">JOB DEFINITION</span><h2>岗位与 JD 管理</h2><p>新岗位从这里开始：先录入并核对 JD，再生成岗位人才画像，最后导入候选人和安排面试。</p></div>
             <button id="job-center-close-btn" class="text-button">返回招聘后台</button>
           </div>
-          <div class="job-flow" aria-label="岗位建立流程"><span class="active">1 建立岗位与 JD</span><span>2 生成画像草稿</span><span>3 HR 审核标准</span><span>4 导入候选人</span></div>
+          <div class="job-flow" aria-label="岗位建立流程"><span class="active">1 建立岗位与 JD</span><span>2 生成画像草稿</span><span>3 确认岗位标准</span><span>4 导入候选人</span></div>
           <div id="job-center-summary" class="job-center-summary"></div>
           <div class="job-center-layout">
             <aside class="job-directory">
@@ -182,7 +182,7 @@
                 <div class="job-editor-grid">
                   <label>岗位名称<input id="job-title-input" maxlength="128" required placeholder="例如：商业化运营经理" /></label>
                   <label>岗位编号（可选）<input id="job-code-input" maxlength="128" placeholder="例如：OPS-2026-01" /></label>
-                  <label>招聘状态<select id="job-status-input"><option value="active">招聘中</option><option value="paused">暂停招聘</option></select></label>
+                  <label>招聘状态<select id="job-status-input"><option value="active">在招</option><option value="paused">暂停招聘</option><option value="closed">已关闭</option></select></label>
                 </div>
                 <div class="jd-import-card">
                   <div><strong>导入 JD 文件</strong><span>支持 PDF、Word、TXT、Markdown，提取后仍需 HR 检查</span></div>
@@ -289,7 +289,7 @@
 
         <section id="talent-profile-panel" class="talent-profile-panel panel hidden">
           <div class="task-header">
-            <div><span class="kicker">PROFILE GOVERNANCE</span><h2>岗位人才画像版本中心</h2><p>画像定义岗位成功证据，不定义候选人的个人背景。所有版本均由 HR 审核后生效。</p></div>
+            <div><span class="kicker">PROFILE GOVERNANCE</span><h2>岗位人才画像版本中心</h2><p>画像定义岗位成功证据，不定义候选人的个人背景。HR 可先保存草稿，再决定何时生效。</p></div>
             <button id="profile-close-btn" class="text-button">返回招聘后台</button>
           </div>
           <div class="profile-toolbar">
@@ -301,7 +301,7 @@
             <button id="profile-refresh-btn" class="secondary">刷新</button>
           </div>
           <div id="profile-status" class="profile-status"></div>
-          <div class="knowledge-boundary"><strong>样本边界</strong><span>首版来自 JD 与分轮标准能力；后续版本至少需要 3 份有效录用或历史成功样本。试用期通过属于更强验证信号，所有版本仍须 HR 审核。</span></div>
+          <div class="knowledge-boundary"><strong>样本边界</strong><span>首版来自 JD 与分轮标准能力；后续版本至少需要 3 份有效录用或历史成功样本。试用期通过属于更强验证信号，AI 只生成草稿，不会自动改动当前生效画像。</span></div>
           <section id="historical-import-review" class="historical-import-review hidden">
             <div class="evaluation-heading"><div><span class="kicker">DE-IDENTIFIED PREVIEW</span><h3>历史样本脱敏预览</h3></div><button id="historical-import-cancel" class="text-button">取消导入</button></div>
             <div id="historical-import-summary" class="import-summary"></div>
@@ -686,6 +686,6 @@
       </div>
     </dialog>
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=1.0.4-task-menu-clipping" defer></script>
+    <script src="/static/app.js?v=1.1.0-job-lifecycle" defer></script>
   </body>
 </html>

@@ -56,7 +56,7 @@ class AdminJobSave(BaseModel):
     title: str = Field(min_length=2, max_length=128)
     jd_text: str = Field(min_length=20, max_length=100_000)
     source_job_code: str | None = Field(default=None, max_length=128)
-    status: Literal["active", "paused"] = "active"
+    status: Literal["active", "paused", "closed"] = "active"
 
     @model_validator(mode="after")
     def clean_job_definition(self) -> "AdminJobSave":
@@ -377,7 +377,25 @@ class KnowledgeProposalReview(BaseModel):
 
 
 class TalentProfileActivate(BaseModel):
-    confirmed_by_hr: bool
+    # Kept for backwards compatibility with the original activation endpoint.
+    # The new HR flow uses an explicit "保存并生效" action instead of a review step.
+    confirmed_by_hr: bool = True
+
+
+class JobStatusUpdate(BaseModel):
+    status: Literal["active", "paused", "closed"]
+
+
+class TalentProfileDraftSave(BaseModel):
+    profile_payload: dict[str, Any] = Field(min_length=1)
+    change_summary: str = Field(min_length=5, max_length=1000)
+
+    @model_validator(mode="after")
+    def clean_talent_profile_draft(self) -> "TalentProfileDraftSave":
+        self.change_summary = self.change_summary.strip()
+        if not self.change_summary:
+            raise ValueError("change_summary cannot be blank")
+        return self
 
 
 class CompanyProfileCompetencyInput(BaseModel):

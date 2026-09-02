@@ -33,6 +33,7 @@ def build_or_refresh_profile_draft(
     *,
     job: Job,
     created_by: str,
+    force: bool = False,
 ) -> tuple[TalentProfileVersion, bool]:
     active = db.scalar(
         select(TalentProfileVersion).where(
@@ -52,6 +53,11 @@ def build_or_refresh_profile_draft(
         .order_by(TalentProfileVersion.version_number.desc())
     )
     if current_draft:
+        # A manually edited draft is the HR working copy. Background refreshes
+        # must not silently overwrite it; the explicit generate/refresh action
+        # passes force=True when HR asks for a new AI proposal.
+        if current_draft.evidence_summary.get("manual_edit") and not force:
+            return current_draft, False
         changed = (
             current_draft.evidence_summary.get("sample_signature")
             != evidence_summary.get("sample_signature")
@@ -330,7 +336,7 @@ def _build_profile(
         if job_definition_changed:
             change_summary = (
                 "岗位 JD 已由 HR 更新；本草稿重新提取岗位重点并组合当前公司标准，"
-                "只影响尚未开始的面试，等待 HR 审核后生效。"
+                "只影响尚未开始的面试，待 HR 确认后生效。"
             )
         elif company_inheritance_changed and not outcome["threshold_met"]:
             change_summary = (
@@ -341,7 +347,7 @@ def _build_profile(
             top_names = [item["competency_name"] for item in outcome["observed_competencies"][:3]]
             change_summary = (
                 f"基于 {outcome['eligible_offer_samples']} 份有效录用/历史样本形成候选更新；"
-                f"重点复核 {'、'.join(top_names) or '现有能力项'}，不自动修改录用标准。"
+                f"重点关注 {'、'.join(top_names) or '现有能力项'}，由 HR 结合实际需求确认，不自动修改录用标准。"
             )
         else:
             change_summary = (
@@ -353,7 +359,7 @@ def _build_profile(
             top_names = [item["competency_name"] for item in outcome["observed_competencies"][:3]]
             change_summary = (
                 f"根据岗位 JD 与 {outcome['historical_positive_samples']} 份脱敏历史成功样本建立首版；"
-                f"重点复核 {'、'.join(top_names) or '现有能力项'}，由 HR 审核后生效。"
+                f"重点关注 {'、'.join(top_names) or '现有能力项'}，由 HR 结合实际需求确认后生效。"
             )
         else:
             change_summary = "根据岗位 JD 与业务面、HR 面、CEO 面的标准能力项建立首次人才画像基线。"

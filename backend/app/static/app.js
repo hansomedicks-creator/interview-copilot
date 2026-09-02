@@ -34,6 +34,7 @@ const state = {
   systemDocsStatus: null,
   profileJobs: [],
   profileCenter: null,
+  jobCenterStatus: "active",
   companyProfileCenter: null,
   historicalPreview: null,
   qualityOverview: null,
@@ -66,6 +67,21 @@ const samples = [
 ];
 
 const $ = (id) => document.getElementById(id);
+
+const JOB_STATUS_LABELS = { active: "在招", paused: "暂停招聘", closed: "已关闭" };
+
+function jobRecruitmentStatus(jobOrStatus) {
+  const value = typeof jobOrStatus === "string" ? jobOrStatus : jobOrStatus?.recruitment_status || jobOrStatus?.status;
+  if (value === "paused") return "paused";
+  if (["closed", "archived"].includes(value)) return "closed";
+  if (value === "draft") return "draft";
+  // pilot is a legacy internal value for an open recruiting job.
+  return "active";
+}
+
+function jobAcceptsNewRecruitment(job) {
+  return ["active", "pilot"].includes(job?.status) || job?.recruitment_status === "active";
+}
 
 function setLargeText(enabled) {
   document.body.classList.toggle("large-text", enabled);
@@ -445,7 +461,7 @@ async function scheduleImportedCandidate(task) {
 
 function renderTaskJobOptions(preferredJobId = null) {
   const select = $("task-job-select");
-  const activeJobs = state.taskJobs.filter((job) => job.status !== "paused");
+  const activeJobs = state.taskJobs.filter(jobAcceptsNewRecruitment);
   select.innerHTML = '<option value="">请选择已建立岗位</option>' + activeJobs.map((job) =>
     `<option value="${escapeHtml(job.id)}">${escapeHtml(job.title)}${job.source_job_code ? ` · ${escapeHtml(job.source_job_code)}` : ""}</option>`
   ).join("");
@@ -505,6 +521,7 @@ async function openAdminPanel(view = "admin") {
 
 async function openJobCenter(preferredJobId = null) {
   setSidebarActive("jobs");
+  if (!["active", "paused", "closed"].includes(state.jobCenterStatus)) state.jobCenterStatus = "active";
   ["admin-panel", "task-creator", "resume-import-panel", "talent-profile-panel", "company-profile-panel", "quality-dashboard-panel", "knowledge-panel", "governance-panel", "notification-panel", "readiness-panel", "report-panel", "final-review-panel"].forEach((id) => $(id).classList.add("hidden"));
   $("job-center-panel").classList.remove("hidden");
   try {
@@ -518,15 +535,7 @@ async function closeJobCenter() {
 
 async function loadJobCenter(preferredJobId = null) {
   state.jobCenterJobs = await api("/api/v1/admin/jobs");
-  const activeCount = state.jobCenterJobs.filter((job) => job.status !== "paused").length;
-  const jdReadyCount = state.jobCenterJobs.filter((job) => job.jd_character_count >= 20).length;
-  const profileReadyCount = state.jobCenterJobs.filter((job) => job.profile?.state === "active").length;
-  const waitingReviewCount = state.jobCenterJobs.filter((job) => job.profile?.draft_version).length;
-  $("job-center-summary").innerHTML = `
-    <article><small>岗位总数</small><strong>${state.jobCenterJobs.length}</strong><span>${activeCount} 个招聘中</span></article>
-    <article><small>JD 已建立</small><strong>${jdReadyCount}</strong><span>可用于生成面试重点</span></article>
-    <article><small>画像已生效</small><strong>${profileReadyCount}</strong><span>已由 HR 审核</span></article>
-    <article><small>画像待审核</small><strong>${waitingReviewCount}</strong><span>不会自动生效</span></article>`;
+  renderJobStatusTabs();
   if (preferredJobId && state.jobCenterJobs.some((job) => job.id === preferredJobId)) state.currentJobId = preferredJobId;
   else if (state.currentJobId && !state.jobCenterJobs.some((job) => job.id === state.currentJobId)) state.currentJobId = null;
   renderJobList();
@@ -534,17 +543,99 @@ async function loadJobCenter(preferredJobId = null) {
   else if (!state.jobCenterJobs.length) startNewJob();
 }
 
+function renderJobStatusTabs() {
+  const counts = { active: 0, paused: 0, closed: 0 };
+  state.jobCenterJobs.forEach((job) => {
+    const status = jobRecruitmentStatus(job);
+    if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+  });
+  $("job-center-summary").innerHTML = Object.entries(JOB_STATUS_LABELS).map(([status, label]) => `
+    <button type="button" class="job-status-tab ${status === state.jobCenterStatus ? "active" : ""}" data-job-status-filter="${status}">
+      <span>${label}</span><strong>${counts[status]}</strong>
+    </button>`).join("");
+  document.querySelectorAll("[data-job-status-filter]").forEach((button) => button.addEventListener("click", () => {
+    state.jobCenterStatus = button.dataset.jobStatusFilter;
+    renderJobStatusTabs();
+    renderJobList();
+  }));
+}
+
+function jobListEmptyState(status, query) {
+  if (query) return `<div class="empty-state"><strong>没有匹配岗位</strong><span>换个岗位名称或编号试试。</span></div>`;
+  const copy = {
+    active: ["当前没有正在招聘的岗位", "新的招聘需求可以从创建岗位开始。"],
+    paused: ["当前没有暂停招聘的岗位", "暂时冻结的岗位会保留在这里。"],
+    closed: ["当前还没有已关闭的岗位", "关闭后的历史岗位会保留在这里。"],
+  }[status];
+  return `<div class="empty-state"><strong>${copy[0]}</strong><span>${copy[1]}</span></div>`;
+}
+
+function jobActionMarkup(job) {
+  const status = jobRecruitmentStatus(job);
+  const actions = status === "active"
+    ? [["edit", "编辑岗位与 JD"], ["profile", "查看岗位画像"], ["pause", "暂停招聘"], ["close", "关闭岗位"]]
+    : status === "paused"
+      ? [["edit", "编辑岗位与 JD"], ["profile", "查看岗位画像"], ["resume", "恢复招聘"], ["close", "关闭岗位"]]
+      : [["edit", "查看岗位与 JD"], ["profile", "查看岗位画像"], ["resume", "重新开启招聘"]];
+  return `<details class="job-actions-menu"><summary aria-label="${escapeHtml(job.title)} 更多操作">···</summary><div class="job-actions-popover">${actions.map(([action, label]) => `<button type="button" data-job-action="${action}" data-job-id="${escapeHtml(job.id)}" class="${action === "close" ? "danger-text" : ""}">${label}</button>`).join("")}</div></details>`;
+}
+
 function renderJobList() {
   const query = $("job-search-input").value.trim().toLowerCase();
-  const jobs = state.jobCenterJobs.filter((job) => !query || `${job.title} ${job.source_job_code || ""}`.toLowerCase().includes(query));
-  const profileLabel = (job) => job.profile?.state === "active" ? "画像已生效" : job.profile?.draft_version ? "画像待审核" : "画像未生成";
-  $("job-list").innerHTML = jobs.map((job) => `
-    <button class="job-list-card ${job.id === state.currentJobId ? "active" : ""} ${job.status === "paused" ? "paused" : ""}" data-job-select="${escapeHtml(job.id)}">
-      <span class="job-list-card-head"><strong>${escapeHtml(job.title)}</strong><span class="job-profile-badge ${job.profile?.state === "active" ? "active" : ""}">${profileLabel(job)}</span></span>
-      <small>${escapeHtml(job.source_job_code || "未设置岗位编号")} · ${job.status === "paused" ? "暂停招聘" : "招聘中"}</small>
-      <span class="job-list-card-meta"><span>JD ${job.jd_character_count} 字</span><span>${job.application_count} 位候选人</span></span>
-    </button>`).join("") || '<div class="empty-state"><strong>没有匹配岗位</strong><span>换个关键词，或点击“新建岗位”。</span></div>';
+  const jobs = state.jobCenterJobs.filter((job) => jobRecruitmentStatus(job) === state.jobCenterStatus)
+    .filter((job) => !query || `${job.title} ${job.source_job_code || ""}`.toLowerCase().includes(query));
+  const profileLabel = (job) => job.profile?.state === "active" ? "画像已生效" : job.profile?.draft_version ? "画像草稿" : "画像未生成";
+  $("job-list").innerHTML = jobs.map((job) => {
+    const status = jobRecruitmentStatus(job);
+    return `<article class="job-list-card ${job.id === state.currentJobId ? "active" : ""} ${status}" data-job-card="${escapeHtml(job.id)}">
+      <button type="button" class="job-list-card-select" data-job-select="${escapeHtml(job.id)}">
+        <span class="job-list-card-head"><strong>${escapeHtml(job.title)}</strong><span class="job-profile-badge ${job.profile?.state === "active" ? "active" : ""}">${profileLabel(job)}</span></span>
+        <small>${escapeHtml(job.source_job_code || "未设置岗位编号")} · <span class="job-status-label ${status}">${JOB_STATUS_LABELS[status]}</span></small>
+        <span class="job-list-card-meta"><span>JD ${job.jd_character_count} 字</span><span>${job.application_count} 位候选人</span></span>
+      </button>
+      ${jobActionMarkup(job)}
+    </article>`;
+  }).join("") || jobListEmptyState(state.jobCenterStatus, query);
   document.querySelectorAll("[data-job-select]").forEach((button) => button.addEventListener("click", () => selectJob(button.dataset.jobSelect)));
+  document.querySelectorAll("[data-job-action]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const menu = button.closest("details");
+    if (menu) menu.open = false;
+    handleJobAction(button.dataset.jobAction, button.dataset.jobId);
+  }));
+  document.querySelectorAll(".job-actions-menu").forEach((details) => details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    document.querySelectorAll(".job-actions-menu[open]").forEach((other) => { if (other !== details) other.open = false; });
+    const rect = details.getBoundingClientRect();
+    details.classList.toggle("open-upward", window.innerHeight - rect.bottom < 190);
+  }));
+}
+
+async function handleJobAction(action, jobId) {
+  if (action === "edit") return selectJob(jobId);
+  if (action === "profile") return openTalentProfilePanel(jobId);
+  if (action === "pause" || action === "resume" || action === "close") {
+    const target = action === "pause" ? "paused" : action === "close" ? "closed" : "active";
+    return changeJobStatus(jobId, target);
+  }
+}
+
+async function changeJobStatus(jobId, targetStatus) {
+  const job = state.jobCenterJobs.find((item) => item.id === jobId);
+  if (!job) return;
+  const copy = {
+    paused: "暂停招聘？\n\n暂停后，该岗位将不再出现在“在招”列表中，但岗位 JD、人才画像和历史招聘数据都会继续保留。\n\n之后可以随时恢复招聘。",
+    closed: "关闭这个岗位？\n\n关闭后，该岗位将退出日常招聘工作区，但 JD、岗位画像、候选人和历史面试数据仍然保留。\n\n如果只是暂时不招聘，建议选择“暂停招聘”。",
+    active: "恢复招聘？\n\n恢复后，该岗位将重新出现在“在招”岗位列表，并可以继续导入候选人和创建面试任务。",
+  }[targetStatus];
+  if (!window.confirm(copy)) return;
+  try {
+    await api(`/api/v1/admin/jobs/${jobId}/status`, { method: "PATCH", body: JSON.stringify({ status: targetStatus }) });
+    state.jobCenterStatus = targetStatus;
+    toast(`${job.title} 已${targetStatus === "paused" ? "暂停招聘" : targetStatus === "closed" ? "关闭" : "恢复招聘"}`);
+    await loadJobCenter(jobId);
+  } catch (error) { toast(error.message, true); }
 }
 
 function selectJob(jobId) {
@@ -557,13 +648,13 @@ function selectJob(jobId) {
   $("job-editor-title").textContent = `维护 ${job.title}`;
   $("job-title-input").value = job.title;
   $("job-code-input").value = job.source_job_code || "";
-  $("job-status-input").value = job.status === "paused" ? "paused" : "active";
+  $("job-status-input").value = jobRecruitmentStatus(job);
   $("job-jd-input").value = job.jd_text || "";
   const profileBadge = $("job-editor-profile-state");
   profileBadge.className = `pill ${job.profile?.state === "active" ? "ready" : "warning"}`;
-  profileBadge.textContent = job.profile?.state === "active" ? `${job.profile.active_version} 已生效` : job.profile?.draft_version ? `${job.profile.draft_version} 待审核` : "尚未生成画像";
+  profileBadge.textContent = job.profile?.state === "active" ? `${job.profile.active_version} 已生效` : job.profile?.draft_version ? `${job.profile.draft_version} 草稿` : "尚未生成画像";
   $("job-open-profile-btn").disabled = false;
-  $("job-import-candidates-btn").disabled = job.status === "paused";
+  $("job-import-candidates-btn").disabled = !jobAcceptsNewRecruitment(job);
   updateJobJdCount();
   renderJobSemanticSummary(job.semantic_profile);
   renderJobList();
@@ -661,7 +752,8 @@ async function saveJobDefinition(event) {
     const frozenText = result.frozen_in_progress ? `；${result.frozen_in_progress} 场进行中面试保持原标准` : "";
     const mode = result.job.semantic_profile?.analysis_mode;
     const semanticMode = mode === "llm_semantic" ? "AI 已完成岗位语义理解" : mode === "hybrid_semantic" ? "AI 理解结果已由本地规则补全" : "已启用本地结构化保障";
-    toast(`${title} 已保存，${semanticMode}；${result.talent_profile_draft.version_label} 等待 HR 审核${refreshText}${frozenText}`);
+    state.jobCenterStatus = jobRecruitmentStatus(result.job);
+    toast(`${title} 已保存，${semanticMode}；${result.talent_profile_draft.version_label} 草稿已准备好，可由 HR 保存草稿或保存并生效${refreshText}${frozenText}`);
     await loadJobCenter(state.currentJobId);
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.textContent = originalLabel; }
@@ -695,7 +787,7 @@ async function openResumeImport(preferredJobId = null) {
   $("import-progress").classList.add("hidden");
   $("resume-batch-files").value = "";
   state.importJobs = await api("/api/v1/admin/jobs");
-  const activeJobs = state.importJobs.filter((job) => job.status !== "paused");
+  const activeJobs = state.importJobs.filter(jobAcceptsNewRecruitment);
   $("import-job-select").innerHTML = '<option value="">请选择已建立岗位</option>' + activeJobs.map((job) => `<option value="${escapeHtml(job.id)}">${escapeHtml(job.title)}${job.source_job_code ? ` · ${escapeHtml(job.source_job_code)}` : ""}</option>`).join("");
   if (preferredJobId && activeJobs.some((job) => job.id === preferredJobId)) $("import-job-select").value = preferredJobId;
   renderImportJobContext();
@@ -708,7 +800,7 @@ async function closeResumeImport() {
 function renderImportJobContext() {
   const job = state.importJobs.find((item) => item.id === $("import-job-select").value);
   $("import-job-context").innerHTML = job
-    ? `<strong>${escapeHtml(job.title)}</strong><br>JD ${job.jd_character_count} 字 · ${job.profile?.state === "active" ? `${escapeHtml(job.profile.active_version)} 已生效` : job.profile?.draft_version ? `${escapeHtml(job.profile.draft_version)} 待 HR 审核` : "画像尚未生成"}`
+    ? `<strong>${escapeHtml(job.title)}</strong><br>JD ${job.jd_character_count} 字 · ${job.profile?.state === "active" ? `${escapeHtml(job.profile.active_version)} 已生效` : job.profile?.draft_version ? `${escapeHtml(job.profile.draft_version)} 草稿` : "画像尚未生成"}`
     : "选择岗位后，这里会显示 JD 和画像状态。";
 }
 
@@ -1117,6 +1209,8 @@ function renderGovernanceCenter() {
   const actionLabels = {
     "job.created_from_jd": "新建岗位并保存 JD",
     "job.jd_updated": "更新岗位 JD",
+    "job.recruitment_status_changed": "调整岗位招聘状态",
+    "job_profile.draft_saved": "保存岗位画像草稿",
     "application.final_decision": "确认候选人最终流程决定",
     "report.locked": "锁定面试报告版本",
     "retention.cleanup_executed": "执行到期材料清理",
@@ -1425,25 +1519,53 @@ async function loadTalentProfileCenter() {
   } catch (error) { toast(error.message, true); }
 }
 
+function profileEditorLines(value) {
+  return Array.isArray(value) ? value.filter(Boolean).join("\n") : String(value || "");
+}
+
+function profileEditorMarkup(version) {
+  const profile = version.profile_payload || {};
+  const competencies = Array.isArray(profile.must_have) ? profile.must_have : [];
+  const activationBlocked = version.source_mode === "outcome_aggregation" && !version.evidence_summary?.threshold_met;
+  return `<section class="profile-editor hidden" data-profile-editor="${escapeHtml(version.id)}">
+    <div class="profile-editor-heading"><div><span class="kicker">EDIT WORKING COPY</span><h4>编辑岗位画像草稿</h4></div><span class="helper">只修改岗位成功证据，不改变历史版本</span></div>
+    <label>岗位画像摘要<textarea data-profile-field="summary" rows="3">${escapeHtml(profile.summary || "")}</textarea></label>
+    <div class="profile-editor-grid">
+      <label>岗位成功标准 <span class="field-hint">每行一条</span><textarea data-profile-field="success_outcomes" rows="5">${escapeHtml(profileEditorLines(profile.success_outcomes))}</textarea></label>
+      <label>正向信号 <span class="field-hint">每行一条</span><textarea data-profile-field="positive_signals" rows="5">${escapeHtml(profileEditorLines(profile.positive_signals))}</textarea></label>
+      <label>风险信号 <span class="field-hint">每行一条</span><textarea data-profile-field="risk_signals" rows="5">${escapeHtml(profileEditorLines(profile.risk_signals))}</textarea></label>
+      <label>证据要求 <span class="field-hint">每行一条</span><textarea data-profile-field="evidence_requirements" rows="5">${escapeHtml(profileEditorLines(profile.evidence_requirements))}</textarea></label>
+    </div>
+    <div class="profile-editor-competencies"><strong>核心能力</strong>${competencies.map((item, index) => `<div class="profile-editor-competency" data-profile-competency-index="${index}">
+      <label>能力 ${index + 1}<input data-profile-comp-field="competency_name" value="${escapeHtml(item.competency_name || item.name || "")}" /></label>
+      <label>岗位定义<textarea data-profile-comp-field="definition" rows="2">${escapeHtml(item.definition || "")}</textarea></label>
+      <label>验证重点<textarea data-profile-comp-field="evidence_requirements" rows="2">${escapeHtml(profileEditorLines(item.evidence_requirements))}</textarea></label>
+    </div>`).join("")}</div>
+    <label>本次修改说明<input data-profile-field="change_summary" value="${escapeHtml(version.change_summary || "")}" placeholder="例如：补充亲自负责与业务结果的判断标准" /></label>
+    <div class="profile-editor-actions"><button type="button" class="text-button" data-profile-cancel-edit="${escapeHtml(version.id)}">取消</button><button type="button" class="secondary" data-profile-save-draft="${escapeHtml(version.id)}">保存草稿</button><button type="button" class="primary" data-profile-save-and-activate="${escapeHtml(version.id)}" ${activationBlocked ? "disabled" : ""}>保存并生效</button></div>
+  </section>`;
+}
+
 function renderTalentProfileCenter() {
   const center = state.profileCenter;
   const samples = center.outcome_samples;
   const active = center.active_version;
   const draft = center.draft_version;
   $("profile-status").innerHTML = `
-    <article class="knowledge-status-card ${active ? "ready" : "warning"}"><small>当前生效版本</small><strong>${escapeHtml(active?.version_label || "尚未建立")}</strong><span>${active ? "已由 HR 审核" : "建议先生成 JD 基线"}</span></article>
+    <article class="knowledge-status-card"><small>招聘状态</small><strong>${escapeHtml(JOB_STATUS_LABELS[center.job.recruitment_status] || "待完善")}</strong><span>与岗位画像版本状态独立</span></article>
+    <article class="knowledge-status-card ${active ? "ready" : "warning"}"><small>当前生效版本</small><strong>${escapeHtml(active?.version_label || "尚未建立")}</strong><span>${active ? "用于后续招聘与面试" : "建议先生成 JD 基线"}</span></article>
     <article class="knowledge-status-card"><small>有效画像样本</small><strong>${samples.eligible_offer_samples} / ${samples.minimum_outcome_samples}</strong><span>${samples.threshold_met ? "达到更新建议门槛" : "继续积累，不自动调整画像"}</span></article>
     <article class="knowledge-status-card"><small>历史成功样本</small><strong>${samples.historical_positive_samples || 0}</strong><span>${samples.performance_validated_samples || 0} 份已有试用期验证</span></article>
     <article class="knowledge-status-card"><small>版本记录</small><strong>${center.versions.length}</strong><span>草稿、生效与历史版本均保留</span></article>`;
 
   const renderProfile = (version, isDraft) => {
-    if (!version) return `<article class="profile-version empty"><strong>${isDraft ? "暂无待审核草稿" : "暂无生效画像"}</strong><span>${isDraft ? "点击上方按钮生成第一版。" : "首版必须由 HR 人工确认后才能生效。"}</span></article>`;
+    if (!version) return `<article class="profile-version empty"><strong>${isDraft ? "暂无画像草稿" : "暂无生效画像"}</strong><span>${isDraft ? "点击上方按钮生成第一版。" : "首版生成后，可由 HR 选择保存草稿或保存并生效。"}</span></article>`;
     const profile = version.profile_payload;
     const mustHave = profile.must_have || [];
     const companyFoundation = profile.company_foundation;
     const activationBlocked = version.source_mode === "outcome_aggregation" && !version.evidence_summary.threshold_met;
     return `<article class="profile-version ${version.status}">
-      <div class="profile-version-head"><div><span class="pill">${escapeHtml(version.version_label)}</span><h3>${isDraft ? "待审核画像草稿" : "当前生效画像"}</h3></div><strong>${version.source_mode === "jd_baseline" ? "JD 基线" : version.source_mode === "jd_revision" ? "JD 更新" : version.source_mode === "company_inheritance" ? "公司标准继承" : "样本更新"}</strong></div>
+      <div class="profile-version-head"><div><span class="pill">${escapeHtml(version.version_label)}</span><h3>${isDraft ? "画像草稿" : "当前生效画像"}</h3></div><strong>${version.source_mode === "jd_baseline" ? "JD 基线" : version.source_mode === "jd_revision" ? "JD 更新" : version.source_mode === "company_inheritance" ? "公司标准继承" : "样本更新"}</strong></div>
       <p>${escapeHtml(profile.summary || "")}</p>
       <div class="profile-change"><strong>本版说明</strong><span>${escapeHtml(version.change_summary)}</span></div>
       ${companyFoundation ? `<div class="company-profile-path"><strong>继承公司标准</strong><span>${escapeHtml(companyFoundation.company_name)} · ${escapeHtml(companyFoundation.version_label)} · ${(companyFoundation.competencies || []).length} 项公司通用能力</span></div>` : '<div class="knowledge-boundary"><strong>尚未继承</strong><span>公司基础画像尚未生效；岗位画像当前只使用 JD 与分轮能力项。</span></div>'}
@@ -1451,17 +1573,85 @@ function renderTalentProfileCenter() {
       <div class="profile-outcomes"><strong>岗位成功结果</strong><ul>${(profile.success_outcomes || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
       ${profile.observed_signals?.length ? `<div class="profile-observed"><strong>达到门槛后的样本观察</strong>${profile.observed_signals.map((item) => `<span>${escapeHtml(item.competency_name)} · ${item.observation_count} 次观察${item.average_human_score == null ? "" : ` · 人工均分 ${item.average_human_score}`}${item.historical_signal_count ? ` · 历史信号 ${item.historical_signal_count}` : ""}</span>`).join("")}</div>` : ""}
       <div class="profile-actions">
-        ${isDraft ? `<button class="primary compact" data-profile-activate="${escapeHtml(version.id)}" ${activationBlocked ? "disabled" : ""}>审核并生效</button>${activationBlocked ? `<small>还需 ${Math.max(0, version.evidence_summary.minimum_outcome_samples - version.evidence_summary.eligible_offer_samples)} 份有效录用/历史样本</small>` : ""}` : ""}
-        ${version.publication.status === "failed" ? `<button class="secondary compact" data-profile-publish="${escapeHtml(version.id)}">重试发布到 Obsidian</button><small class="knowledge-error">${escapeHtml(version.publication.error_message)}</small>` : ""}
-        ${version.publication.obsidian_uri ? `<a class="secondary compact link-button" href="${escapeHtml(version.publication.obsidian_uri)}">在 Obsidian 查看</a>` : ""}
+        ${isDraft ? `<button class="secondary compact" data-profile-edit="${escapeHtml(version.id)}">编辑画像</button><button class="secondary compact" data-profile-save-draft="${escapeHtml(version.id)}">保存草稿</button><button class="primary compact" data-profile-save-and-activate="${escapeHtml(version.id)}" ${activationBlocked ? "disabled" : ""}>保存并生效</button><small class="profile-save-hint">保存草稿不会影响当前生效版本</small>${activationBlocked ? `<small>还需 ${Math.max(0, version.evidence_summary.minimum_outcome_samples - version.evidence_summary.eligible_offer_samples)} 份有效录用/历史样本</small>` : ""}` : `<span class="profile-publication-status">${version.publication.status === "published" ? "知识文件已同步" : version.publication.status === "failed" ? "知识文件同步待处理" : "知识文件尚未同步"}</span>`}
       </div>
+      ${isDraft ? profileEditorMarkup(version) : ""}
     </article>`;
   };
   $("profile-content").innerHTML = `
     <div class="profile-columns">${renderProfile(active, false)}${renderProfile(draft, true)}</div>
-    <section class="profile-history"><div class="evaluation-heading"><div><span class="kicker">AUDIT TRAIL</span><h3>版本记录</h3></div></div>${center.versions.map((item) => `<div><strong>${escapeHtml(item.version_label)}</strong><span>${escapeHtml(({ draft: "待审核", active: "当前生效", superseded: "历史版本" })[item.status] || item.status)}</span><small>${escapeHtml(item.change_summary)}</small></div>`).join("") || '<p class="muted">暂无版本记录。</p>'}</section>`;
-  document.querySelectorAll("[data-profile-activate]").forEach((button) => button.addEventListener("click", () => activateTalentProfile(button.dataset.profileActivate)));
-  document.querySelectorAll("[data-profile-publish]").forEach((button) => button.addEventListener("click", () => retryTalentProfilePublish(button.dataset.profilePublish)));
+    <section class="profile-history"><div class="evaluation-heading"><div><span class="kicker">VERSION HISTORY</span><h3>版本记录</h3></div></div>${center.versions.map((item) => `<div><strong>${escapeHtml(item.version_label)}</strong><span>${escapeHtml(({ draft: "草稿", active: "当前生效", superseded: "历史版本" })[item.status] || item.status)}</span><small>${escapeHtml(item.change_summary)}</small></div>`).join("") || '<p class="muted">暂无版本记录。</p>'}</section>`;
+  document.querySelectorAll("[data-profile-edit]").forEach((button) => button.addEventListener("click", () => toggleProfileEditor(button.dataset.profileEdit)));
+  document.querySelectorAll("[data-profile-cancel-edit]").forEach((button) => button.addEventListener("click", () => toggleProfileEditor(button.dataset.profileCancelEdit, false)));
+  document.querySelectorAll("[data-profile-save-draft]").forEach((button) => button.addEventListener("click", () => saveTalentProfileDraft(button.dataset.profileSaveDraft, false)));
+  document.querySelectorAll("[data-profile-save-and-activate]").forEach((button) => button.addEventListener("click", () => saveTalentProfileDraft(button.dataset.profileSaveAndActivate, true)));
+}
+
+function toggleProfileEditor(versionId, forceOpen = null) {
+  const editor = document.querySelector(`[data-profile-editor="${CSS.escape(versionId)}"]`);
+  if (!editor) return;
+  const shouldOpen = forceOpen == null ? editor.classList.contains("hidden") : forceOpen;
+  editor.classList.toggle("hidden", !shouldOpen);
+  const trigger = document.querySelector(`[data-profile-edit="${CSS.escape(versionId)}"]`);
+  if (trigger) trigger.textContent = shouldOpen ? "收起编辑" : "编辑画像";
+  if (shouldOpen) editor.querySelector("[data-profile-field='summary']")?.focus();
+}
+
+function readProfileEditor(versionId) {
+  const editor = document.querySelector(`[data-profile-editor="${CSS.escape(versionId)}"]`);
+  if (!editor) throw new Error("找不到岗位画像编辑区，请刷新后重试");
+  const lines = (name) => editor.querySelector(`[data-profile-field="${name}"]`).value.split(/[\n；;]+/).map((item) => item.trim()).filter(Boolean);
+  const source = state.profileCenter?.draft_version?.profile_payload || {};
+  const mustHave = [...editor.querySelectorAll("[data-profile-competency-index]")].map((card) => {
+    const index = Number(card.dataset.profileCompetencyIndex);
+    const original = Array.isArray(source.must_have) ? source.must_have[index] || {} : {};
+    return {
+      ...original,
+      competency_name: card.querySelector("[data-profile-comp-field='competency_name']").value.trim(),
+      definition: card.querySelector("[data-profile-comp-field='definition']").value.trim(),
+      evidence_requirements: card.querySelector("[data-profile-comp-field='evidence_requirements']").value.split(/[\n；;]+/).map((item) => item.trim()).filter(Boolean),
+    };
+  }).filter((item) => item.competency_name);
+  const summary = editor.querySelector("[data-profile-field='summary']").value.trim();
+  const changeSummary = editor.querySelector("[data-profile-field='change_summary']").value.trim();
+  if (summary.length < 10) throw new Error("请补充岗位画像摘要（至少 10 个字符）");
+  if (!mustHave.length) throw new Error("请至少保留一项核心能力");
+  if (!lines("success_outcomes").length) throw new Error("请至少填写一条岗位成功标准");
+  if (changeSummary.length < 5) throw new Error("请填写本次修改说明");
+  return {
+    profile_payload: {
+      summary,
+      must_have: mustHave,
+      success_outcomes: lines("success_outcomes"),
+      positive_signals: lines("positive_signals"),
+      risk_signals: lines("risk_signals"),
+      evidence_requirements: lines("evidence_requirements"),
+    },
+    change_summary: changeSummary,
+  };
+}
+
+async function saveTalentProfileDraft(versionId, activate = false) {
+  if (activate && !window.confirm("确认保存这版岗位画像并立即用于后续招聘与面试？")) return;
+  const buttons = document.querySelectorAll(`[data-profile-save-draft="${CSS.escape(versionId)}"], [data-profile-save-and-activate="${CSS.escape(versionId)}"]`);
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const saved = await api(`/api/v1/admin/jobs/${$("profile-job-select").value}/talent-profile/draft`, {
+      method: "PUT",
+      body: JSON.stringify(readProfileEditor(versionId)),
+    });
+    if (activate) {
+      const result = await api(`/api/v1/admin/jobs/${$("profile-job-select").value}/talent-profile/versions/${saved.id}/activate`, {
+        method: "POST",
+        body: JSON.stringify({ confirmed_by_hr: true }),
+      });
+      toast(result.publication.status === "published" ? `${result.version_label} 已生效并同步知识文件` : `${result.version_label} 已生效，知识文件同步待处理`);
+    } else {
+      toast(`${saved.version_label} 草稿已保存，当前生效版本未改变`);
+    }
+    await loadTalentProfileCenter();
+  } catch (error) { toast(error.message, true); }
+  finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
 async function generateTalentProfileDraft() {
@@ -1469,7 +1659,7 @@ async function generateTalentProfileDraft() {
   if (!jobId) return;
   try {
     const result = await api(`/api/v1/admin/jobs/${jobId}/talent-profile/draft`, { method: "POST" });
-    toast(result.draft_changed ? `${result.version_label} 草稿已生成，等待 HR 审核` : "样本没有变化，已保留现有草稿");
+    toast(result.draft_changed ? `${result.version_label} 草稿已生成，请查看并决定是否生效` : "样本没有变化，已保留现有草稿");
     await loadTalentProfileCenter();
   } catch (error) { toast(error.message, true); }
 }
@@ -1559,26 +1749,7 @@ async function commitHistoricalImport() {
       }),
     });
     clearHistoricalImport();
-    toast(`已导入 ${result.imported_rows} 条，跳过 ${result.skipped_duplicates} 条重复记录；${result.talent_profile_update.version_label} 等待 HR 审核`);
-    await loadTalentProfileCenter();
-  } catch (error) { toast(error.message, true); }
-}
-
-async function activateTalentProfile(versionId) {
-  if (!window.confirm("确认将该画像设为当前岗位标准？旧版本会保留为历史记录，并尝试同步到 Obsidian。")) return;
-  const jobId = $("profile-job-select").value;
-  try {
-    const result = await api(`/api/v1/admin/jobs/${jobId}/talent-profile/versions/${versionId}/activate`, { method: "POST", body: JSON.stringify({ confirmed_by_hr: true }) });
-    toast(result.publication.status === "published" ? `${result.version_label} 已生效并发布到 Obsidian` : `${result.version_label} 已生效，但知识文件发布待重试`);
-    await loadTalentProfileCenter();
-  } catch (error) { toast(error.message, true); }
-}
-
-async function retryTalentProfilePublish(versionId) {
-  const jobId = $("profile-job-select").value;
-  try {
-    const result = await api(`/api/v1/admin/jobs/${jobId}/talent-profile/versions/${versionId}/publish`, { method: "POST" });
-    toast(result.publication.status === "published" ? "岗位画像已发布到 Obsidian" : result.publication.error_message, result.publication.status !== "published");
+    toast(`已导入 ${result.imported_rows} 条，跳过 ${result.skipped_duplicates} 条重复记录；${result.talent_profile_update.version_label} 草稿已更新`);
     await loadTalentProfileCenter();
   } catch (error) { toast(error.message, true); }
 }

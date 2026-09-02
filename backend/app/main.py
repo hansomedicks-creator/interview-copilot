@@ -75,6 +75,7 @@ from .schemas import (
     InterviewerReviewSubmit,
     InterviewReportLock,
     InterviewRoundManageUpdate,
+    JobStatusUpdate,
     JobCreate,
     JobRead,
     KnowledgeProposalCreate,
@@ -94,6 +95,7 @@ from .schemas import (
     SuggestionStatusUpdate,
     SystemDocsSyncRequest,
     TalentProfileActivate,
+    TalentProfileDraftSave,
     TranscriptSegmentCreate,
     TranscriptSegmentRead,
 )
@@ -611,15 +613,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
     def list_jobs(request: Request, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
         _require_role(request, "hr", "admin")
         jobs = db.scalars(select(Job).where(Job.status != "demo").order_by(Job.created_at.desc())).all()
-        seen: set[tuple[str, str | None]] = set()
-        output = []
-        for job in jobs:
-            key = (job.title.strip().lower(), job.source_job_code)
-            if key in seen:
-                continue
-            seen.add(key)
-            output.append(_admin_job_payload(db, job))
-        return output
+        # Each lifecycle record remains visible so closed jobs can serve as
+        # historical archives and the status-tab counts reflect real rows.
+        return [_admin_job_payload(db, job) for job in jobs]
 
     @app.get("/api/v1/admin/jobs/{job_id}")
     def get_admin_job(
@@ -662,6 +658,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             db,
             job=job,
             created_by=user["display_name"],
+            force=True,
         )
         record_audit_event(
             db,
@@ -727,6 +724,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             db,
             job=job,
             created_by=user["display_name"],
+            force=True,
         )
         refreshed_interviews, frozen_in_progress = _refresh_planned_job_interviews(
             db, job, request.app.state.intelligence
@@ -759,6 +757,46 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             "draft_changed": changed,
             "refreshed_interviews": refreshed_interviews,
             "frozen_in_progress": frozen_in_progress,
+        }
+
+    @app.patch("/api/v1/admin/jobs/{job_id}/status")
+    def update_admin_job_status(
+        job_id: str,
+        payload: JobStatusUpdate,
+        request: Request,
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Change the recruitment lifecycle without touching JD or profile data."""
+        user = _require_role(request, "hr", "admin")
+        job = db.get(Job, job_id)
+        if not job or job.status == "demo":
+            raise HTTPException(404, "job not found")
+
+        previous_status = _job_recruitment_status(job.status)
+        next_status = payload.status
+        if previous_status == "closed" and next_status == "paused":
+            raise HTTPException(409, "已关闭岗位只能重新开启招聘，不能直接暂停")
+        if previous_status == next_status:
+            return {
+                "job": _admin_job_payload(db, job),
+                "previous_status": previous_status,
+                "status_changed": False,
+            }
+
+        job.status = next_status
+        record_audit_event(
+            db,
+            user,
+            action="job.recruitment_status_changed",
+            resource_type="job",
+            resource_id=job.id,
+            details={"from": previous_status, "to": next_status},
+        )
+        db.commit()
+        return {
+            "job": _admin_job_payload(db, job),
+            "previous_status": previous_status,
+            "status_changed": True,
         }
 
     @app.get("/api/v1/admin/jobs/{job_id}/talent-profile")
@@ -1030,21 +1068,92 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             db,
             job=job,
             created_by=user["display_name"],
+            force=True,
         )
         db.commit()
         return {**version_payload(version), "draft_changed": changed}
+
+    @app.put("/api/v1/admin/jobs/{job_id}/talent-profile/draft")
+    def save_talent_profile_draft(
+        job_id: str,
+        payload: TalentProfileDraftSave,
+        request: Request,
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Save HR's edited working copy without changing the active profile."""
+        user = _require_role(request, "hr", "admin")
+        job = db.get(Job, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        draft = db.scalar(
+            select(TalentProfileVersion)
+            .where(
+                TalentProfileVersion.job_id == job_id,
+                TalentProfileVersion.status == "draft",
+            )
+            .order_by(TalentProfileVersion.version_number.desc())
+        )
+        if not draft:
+            draft, _ = build_or_refresh_profile_draft(
+                db,
+                job=job,
+                created_by=user["display_name"],
+                force=True,
+            )
+
+        current_payload = dict(draft.profile_payload or {})
+        edited_payload = dict(payload.profile_payload)
+        # Keep the generator's structural metadata and only merge fields that
+        # belong to a岗位画像.  This prevents a UI edit from removing evidence
+        # provenance, company inheritance or anti-bias boundaries.
+        editable_fields = {
+            "summary",
+            "must_have",
+            "success_outcomes",
+            "positive_signals",
+            "risk_signals",
+            "evidence_requirements",
+            "interview_focus_by_round",
+        }
+        for key in editable_fields:
+            if key in edited_payload:
+                current_payload[key] = edited_payload[key]
+        if not current_payload.get("summary"):
+            raise HTTPException(422, "岗位画像摘要不能为空")
+        if not isinstance(current_payload.get("must_have"), list) or not current_payload["must_have"]:
+            raise HTTPException(422, "岗位画像至少需要保留一项核心能力")
+        if not isinstance(current_payload.get("success_outcomes"), list) or not current_payload["success_outcomes"]:
+            raise HTTPException(422, "岗位成功标准不能为空")
+
+        evidence_summary = dict(draft.evidence_summary or {})
+        evidence_summary["manual_edit"] = True
+        evidence_summary["manual_edit_at"] = utc_now().isoformat()
+        draft.profile_payload = current_payload
+        draft.evidence_summary = evidence_summary
+        draft.change_summary = payload.change_summary
+        draft.created_by = user["display_name"]
+        record_audit_event(
+            db,
+            user,
+            action="job_profile.draft_saved",
+            resource_type="talent_profile_version",
+            resource_id=draft.id,
+            details={"job_id": job.id, "version_label": draft.version_label},
+        )
+        db.commit()
+        return version_payload(draft)
 
     @app.post("/api/v1/admin/jobs/{job_id}/talent-profile/versions/{version_id}/activate")
     def activate_talent_profile_version(
         job_id: str,
         version_id: str,
-        payload: TalentProfileActivate,
         request: Request,
+        payload: TalentProfileActivate | None = None,
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         user = _require_role(request, "hr", "admin")
-        if not payload.confirmed_by_hr:
-            raise HTTPException(422, "HR confirmation is required before activating a profile")
+        if payload is not None and not payload.confirmed_by_hr:
+            raise HTTPException(422, "请先确认岗位画像可以用于后续招聘与面试")
         job = db.get(Job, job_id)
         version = db.get(TalentProfileVersion, version_id)
         if not job or not version or version.job_id != job_id:
@@ -1105,11 +1214,19 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         job = db.get(Job, payload.job_id) if payload.job_id else None
         if payload.job_id and not job:
             raise HTTPException(404, "job not found")
+        if not job and payload.job_title:
+            job = _find_reusable_job(
+                db,
+                title=payload.job_title,
+                source_job_code=payload.source_job_code,
+            )
+        if job and not _job_accepts_new_recruitment(job):
+            raise HTTPException(409, _job_recruitment_block_message(job))
         if not job:
             job = Job(
                 id=new_id("job"), title=(payload.job_title or "").strip(), jd_text=payload.jd_text.strip(),
                 source_job_code=payload.source_job_code.strip() if payload.source_job_code else None,
-                status="pilot", competencies=[],
+                status="active", competencies=[],
                 semantic_profile=request.app.state.intelligence.analyze_job_definition(
                     (payload.job_title or "").strip(), payload.jd_text.strip()
                 ),
@@ -1132,6 +1249,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             raise HTTPException(404, "resume import batch not found")
         if batch.status == "completed":
             raise HTTPException(409, "resume import batch is already completed")
+        job = db.get(Job, batch.job_id)
+        if job and not _job_accepts_new_recruitment(job):
+            raise HTTPException(409, _job_recruitment_block_message(job))
         content = await request.body()
         filename = unquote(request.headers.get("x-filename", "resume.txt"))[:256]
         digest = hashlib.sha256(content).hexdigest()
@@ -1206,6 +1326,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         batch = db.get(ResumeImportBatch, batch_id)
         if not batch:
             raise HTTPException(404, "resume import batch not found")
+        job = db.get(Job, batch.job_id)
+        if job and not _job_accepts_new_recruitment(job):
+            raise HTTPException(409, _job_recruitment_block_message(job))
         selected = db.scalars(select(ResumeImportItem).where(ResumeImportItem.batch_id == batch.id, ResumeImportItem.id.in_(payload.item_ids))).all()
         if len(selected) != len(set(payload.item_ids)):
             raise HTTPException(422, "one or more resume items do not belong to this batch")
@@ -1271,13 +1394,13 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             )
             if payload.job_id and not job:
                 raise HTTPException(404, "job not found")
-            if job and job.status == "paused":
-                raise HTTPException(409, "该岗位已暂停招聘，请先在岗位与 JD 中恢复")
+            if job and not _job_accepts_new_recruitment(job):
+                raise HTTPException(409, _job_recruitment_block_message(job))
             if not job:
                 job = Job(
                     id=new_id("job"), title=payload.job_title.strip(), jd_text=payload.jd_text.strip(),
                     source_job_code=payload.source_job_code.strip() if payload.source_job_code else None,
-                    status="pilot", competencies=[],
+                    status="active", competencies=[],
                     semantic_profile=request.app.state.intelligence.analyze_job_definition(
                         payload.job_title.strip(), payload.jd_text.strip()
                     ),
@@ -1862,6 +1985,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             source_job_code=payload.source_job_code,
             competencies=[item.model_dump() for item in payload.competencies],
             semantic_profile=build_local_job_semantic_profile(payload.title, payload.jd_text),
+            status="active",
         )
         db.add(job)
         db.commit()
@@ -3700,6 +3824,32 @@ def _advance_application_stage(
     application.current_stage = "final_review"
 
 
+def _job_recruitment_status(status: str | None) -> str:
+    """Map legacy internal statuses to the three HR-facing job states."""
+    if status in {"paused"}:
+        return "paused"
+    if status in {"closed", "archived"}:
+        return "closed"
+    if status == "draft":
+        # draft is retained as an internal, not-yet-ready state. It should not
+        # silently become available for new candidates or interview tasks.
+        return "draft"
+    # pilot is a legacy name for an open recruiting job.
+    return "active"
+
+
+def _job_accepts_new_recruitment(job: Job | None) -> bool:
+    return bool(job and job.status in {"active", "pilot"})
+
+
+def _job_recruitment_block_message(job: Job) -> str:
+    if _job_recruitment_status(job.status) == "paused":
+        return "该岗位当前已暂停招聘。如需继续安排候选人，请先恢复招聘。"
+    if _job_recruitment_status(job.status) == "closed":
+        return "该岗位已关闭招聘。如需继续安排候选人，请先重新开启招聘。"
+    return "该岗位尚未准备完成，暂不能新增招聘活动，请先在岗位与 JD 中完成设置。"
+
+
 def _admin_job_payload(db: Session, job: Job) -> dict[str, Any]:
     versions = list(
         db.scalars(
@@ -3720,6 +3870,13 @@ def _admin_job_payload(db: Session, job: Job) -> dict[str, Any]:
         "jd_text": job.jd_text,
         "jd_character_count": len(job.jd_text or ""),
         "status": job.status,
+        "recruitment_status": _job_recruitment_status(job.status),
+        "recruitment_status_label": {
+            "active": "在招",
+            "paused": "暂停招聘",
+            "closed": "已关闭",
+            "draft": "待完善",
+        }.get(_job_recruitment_status(job.status), "待完善"),
         "application_count": application_count,
         "semantic_profile": job.semantic_profile or build_local_job_semantic_profile(
             job.title, job.jd_text
@@ -3813,7 +3970,7 @@ def _find_reusable_job(
     if normalized_code:
         matched = db.scalar(
             select(Job)
-            .where(Job.source_job_code == normalized_code)
+            .where(Job.source_job_code == normalized_code, Job.status != "demo")
             .order_by(Job.created_at.desc())
         )
         if matched:
@@ -3823,7 +3980,7 @@ def _find_reusable_job(
         (
             item
             for item in db.scalars(
-                select(Job).where(Job.status != "archived").order_by(Job.created_at.desc())
+                select(Job).where(Job.status.not_in(["archived", "demo"])).order_by(Job.created_at.desc())
             ).all()
             if item.title.strip().casefold() == normalized_title
         ),
@@ -3958,6 +4115,8 @@ def _talent_profile_center_payload(db: Session, job: Job) -> dict[str, Any]:
             "id": job.id,
             "title": job.title,
             "source_job_code": job.source_job_code,
+            "status": job.status,
+            "recruitment_status": _job_recruitment_status(job.status),
             "competency_model_version": job.competency_model_version,
         },
         "active_version": version_payload(active) if active else None,
