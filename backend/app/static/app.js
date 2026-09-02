@@ -1955,11 +1955,9 @@ async function handleTaskAction(event) {
 function openTaskDeleteDialog(task) {
   const deletion = task.deletion || {
     allowed: true,
-    mode: task.rounds.length ? "archive" : "hard_delete",
-    preserves_history: task.rounds.length > 0,
-    reason: task.rounds.length
-      ? "删除后，该任务将从“最近的面试任务”中移除；已经产生的面试记录、评价和历史数据仍会保留。"
-      : "任务尚未开始且未产生正式面试数据，可以安全删除。",
+    mode: "hard_delete",
+    preserves_history: false,
+    reason: "任务尚未开始且未产生正式面试数据，可以安全删除。",
   };
   state.taskDeletion = { task, deletion };
   const isArchive = deletion.mode === "archive" || deletion.preserves_history;
@@ -1971,9 +1969,11 @@ function openTaskDeleteDialog(task) {
   $("task-delete-job").textContent = task.job.title;
   $("task-delete-feedback").textContent = "";
   $("task-delete-feedback").classList.add("hidden");
+  const confirmButton = $("task-delete-confirm");
+  confirmButton.disabled = false;
   $("task-delete-confirm").classList.remove("hidden");
   $("task-delete-cancel").textContent = "取消";
-  $("task-delete-confirm").textContent = "删除";
+  confirmButton.textContent = "删除";
   const dialog = $("task-delete-dialog");
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
@@ -1996,6 +1996,7 @@ async function confirmTaskDeletion() {
     const card = document.querySelector(`[data-admin-task="${CSS.escape(current.task.task_id)}"]`);
     card?.remove();
     state.adminTasks = state.adminTasks.filter((item) => item.task_id !== current.task.task_id);
+    confirmButton.disabled = false;
     closeTaskDeleteDialog();
     await loadAdminTasks();
     toast(result?.mode === "archived" ? "已从最近任务中移除，历史数据已保留" : "已从最近任务中移除");

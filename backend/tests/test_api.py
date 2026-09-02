@@ -3480,6 +3480,46 @@ def test_resume_import_and_unscheduled_candidate_can_be_deleted(tmp_path):
         assert all(item["task_id"] != application_id for item in client.get("/api/v1/admin/interview-tasks").json())
 
 
+def test_expired_unstarted_task_can_be_hard_deleted(tmp_path):
+    with make_client(tmp_path) as client:
+        expired = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
+        created = client.post(
+            "/api/v1/interview-tasks",
+            json={
+                "candidate_name": "过期未面试候选人",
+                "resume_text": "排期已过但从未开始面试。",
+                "job_title": "过期排期删除测试岗位",
+                "jd_text": "负责日常业务执行。",
+                "rounds": [{
+                    "round_type": "business",
+                    "interviewer_names": ["业务负责人"],
+                    "interviewer_open_ids": ["dev-business"],
+                    "scheduled_at": expired.isoformat(),
+                }],
+            },
+        )
+        assert created.status_code == 201
+        application_id = created.json()["task_id"]
+        round_id = created.json()["rounds"][0]["id"]
+        task = next(
+            item
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+            if item["task_id"] == application_id
+        )
+        assert task["rounds"][0]["status"] == "planned"
+        assert task["deletion"] == {
+            "allowed": True,
+            "mode": "hard_delete",
+            "preserves_history": False,
+            "reason": "任务尚未开始且未产生正式面试数据，可以安全删除。",
+        }
+
+        deleted = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
+        assert deleted.status_code == 200
+        assert deleted.json()["mode"] == "hard_deleted"
+        assert client.get(f"/api/v1/interviews/{round_id}").status_code == 404
+
+
 def test_hr_can_remove_unstarted_or_started_task_without_losing_history(tmp_path):
     with make_client(tmp_path) as client:
         start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
