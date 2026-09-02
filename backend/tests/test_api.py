@@ -3480,7 +3480,7 @@ def test_resume_import_and_unscheduled_candidate_can_be_deleted(tmp_path):
         assert all(item["task_id"] != application_id for item in client.get("/api/v1/admin/interview-tasks").json())
 
 
-def test_hr_can_delete_unstarted_task_but_started_task_is_protected(tmp_path):
+def test_hr_can_remove_unstarted_or_started_task_without_losing_history(tmp_path):
     with make_client(tmp_path) as client:
         start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
         payload = {
@@ -3507,9 +3507,11 @@ def test_hr_can_delete_unstarted_task_but_started_task_is_protected(tmp_path):
             if item["task_id"] == application_id
         )
         assert task["deletion"]["allowed"] is True
+        assert task["deletion"]["mode"] == "hard_delete"
         deleted = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+        assert deleted.json()["mode"] == "hard_deleted"
         assert client.get(f"/api/v1/interviews/{round_id}").status_code == 404
         assert all(
             item["task_id"] != application_id
@@ -3533,16 +3535,30 @@ def test_hr_can_delete_unstarted_task_but_started_task_is_protected(tmp_path):
         started_id = started.json()["task_id"]
         started_round_id = started.json()["rounds"][0]["id"]
         acknowledge_and_start(client, started_round_id)
-        protected = next(
-            item
-            for item in client.get("/api/v1/admin/interview-tasks").json()
-            if item["task_id"] == started_id
+        segment = client.post(
+            f"/api/v1/interviews/{started_round_id}/segments",
+            json={
+                "speaker_role": "candidate",
+                "start_ms": 0,
+                "end_ms": 1200,
+                "text": "我完成过一次业务流程优化。",
+                "is_final": True,
+            },
         )
-        assert protected["deletion"]["allowed"] is False
-        assert "不能直接删除" in protected["deletion"]["reason"]
-        blocked = client.delete(f"/api/v1/admin/applications/{started_id}?confirmed=true")
-        assert blocked.status_code == 409
-        assert "不能直接删除" in blocked.json()["detail"]
+        assert segment.status_code == 201
+        assert client.post(f"/api/v1/interviews/{started_round_id}/end").status_code == 200
+        assert client.get(f"/api/v1/interviews/{started_round_id}/scorecard").status_code == 200
+        removed = client.delete(f"/api/v1/admin/applications/{started_id}?confirmed=true")
+        assert removed.status_code == 200
+        assert removed.json()["mode"] == "archived"
+        assert removed.json()["historical_data_preserved"] is True
+        assert client.get(f"/api/v1/interviews/{started_round_id}").status_code == 200
+        assert client.get(f"/api/v1/interviews/{started_round_id}/segments").json()[0]["text_raw"] == "我完成过一次业务流程优化。"
+        assert client.get(f"/api/v1/interviews/{started_round_id}/scorecard").status_code == 200
+        assert all(
+            item["task_id"] != started_id
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+        )
 
 
 def test_interviewer_cannot_delete_hr_interview_task(tmp_path):
@@ -3577,6 +3593,118 @@ def test_interviewer_cannot_delete_hr_interview_task(tmp_path):
         assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-business"}).status_code == 200
         forbidden = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
         assert forbidden.status_code == 403
+
+
+def test_final_rejection_archives_task_from_recent_queue_but_preserves_history(tmp_path):
+    with make_client(tmp_path) as client:
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+        created = client.post(
+            "/api/v1/interview-tasks",
+            json={
+                "candidate_name": "不进入下一轮候选人",
+                "resume_text": "有客户沟通与问题处理经验。",
+                "job_title": "客户服务岗位",
+                "jd_text": "负责客户咨询、问题处理和服务复盘。",
+                "rounds": [{
+                    "round_type": "business",
+                    "interview_mode": "conversation",
+                    "interviewer_names": ["业务负责人"],
+                    "interviewer_open_ids": ["dev-business"],
+                    "scheduled_at": start.isoformat(),
+                }],
+            },
+        )
+        assert created.status_code == 201
+        application_id = created.json()["task_id"]
+        round_id = created.json()["rounds"][0]["id"]
+        assert any(item["task_id"] == application_id for item in client.get("/api/v1/admin/interview-tasks").json())
+
+        acknowledge_and_start(client, round_id)
+        for role, text_value, start_ms, end_ms in [
+            ("interviewer", "请介绍一次你亲自处理的客户问题。", 0, 1200),
+            ("candidate", "我先确认问题，再逐项解决并复盘。", 1201, 2500),
+        ]:
+            assert client.post(
+                f"/api/v1/interviews/{round_id}/segments",
+                json={
+                    "speaker_role": role,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "text": text_value,
+                    "is_final": True,
+                },
+            ).status_code == 201
+        assert client.post(f"/api/v1/interviews/{round_id}/end").status_code == 200
+        submitted = client.post(
+            f"/api/v1/interviews/{round_id}/scorecard/submit",
+            json={
+                "submitted_by": "招聘 HR",
+                "decision": "reject",
+                "summary_notes": "当前不进入下一轮，岗位匹配度不足。",
+                "scores": [],
+            },
+        )
+        assert submitted.status_code == 200
+
+        review = client.post(
+            f"/api/v1/admin/applications/{application_id}/final-decision",
+            json={
+                "decision": "reject",
+                "decided_by": "招聘 HR",
+                "notes": "明确不进入下一轮，关闭当前招聘流程。",
+                "confirmed_by_hr": True,
+            },
+        )
+        assert review.status_code == 200
+        assert review.json()["current_stage"] == "closed_rejected"
+        assert not any(
+            item["task_id"] == application_id
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+        )
+        assert not any(
+            item.get("application_id") == application_id
+            for item in client.get("/api/v1/admin/action-center").json()["items"]
+        )
+
+        history = client.get(f"/api/v1/interviews/{round_id}")
+        assert history.status_code == 200
+        assert history.json()["application"]["archived_at"]
+        assert len(client.get(f"/api/v1/interviews/{round_id}/segments").json()) == 2
+        assert client.get(f"/api/v1/interviews/{round_id}/scorecard").status_code == 200
+
+
+def test_cancelled_task_can_leave_recent_queue_without_deleting_round(tmp_path):
+    with make_client(tmp_path) as client:
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+        created = client.post(
+            "/api/v1/interview-tasks",
+            json={
+                "candidate_name": "取消后归档候选人",
+                "resume_text": "面试尚未开始。",
+                "job_title": "取消测试岗位",
+                "jd_text": "负责日常业务执行与团队沟通。",
+                "rounds": [{
+                    "round_type": "hr",
+                    "interviewer_names": ["开发环境 HR"],
+                    "interviewer_open_ids": ["dev-hr"],
+                    "scheduled_at": start.isoformat(),
+                }],
+            },
+        )
+        assert created.status_code == 201
+        application_id = created.json()["task_id"]
+        round_id = created.json()["rounds"][0]["id"]
+        assert client.post(f"/api/v1/admin/interviews/{round_id}/cancel").status_code == 200
+        task = next(
+            item
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+            if item["task_id"] == application_id
+        )
+        assert task["deletion"]["mode"] == "archive"
+        removed = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
+        assert removed.status_code == 200
+        assert removed.json()["mode"] == "archived"
+        assert client.get(f"/api/v1/interviews/{round_id}").status_code == 200
 
 
 def test_future_assigned_interview_is_visible_in_seven_day_agenda(tmp_path):

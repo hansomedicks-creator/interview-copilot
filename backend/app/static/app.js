@@ -1912,7 +1912,7 @@ async function loadAdminTasks() {
     : tasks;
   const taskRows = visibleTasks.map((task) => `
     <article class="admin-task" data-admin-task="${escapeHtml(task.task_id)}">
-      <div class="admin-task-head"><div><h3>${escapeHtml(task.candidate.display_name)}</h3><small>${escapeHtml(task.job.title)}</small></div><div class="admin-task-head-actions">${task.rounds.length ? `<button class="secondary compact" data-final-review="${escapeHtml(task.task_id)}">查看面试汇总</button>` : `<button class="primary compact" data-schedule-application="${escapeHtml(task.task_id)}">配置面试流程</button>`}<span class="pill">${task.current_stage === "interview_to_schedule" ? "待排期" : escapeHtml(task.current_stage)}</span><details class="task-actions-menu"><summary aria-label="更多任务操作">···</summary><div class="task-actions-popover"><button type="button" data-task-action="view" data-application-id="${escapeHtml(task.task_id)}">${task.rounds.length ? "查看详情" : "配置面试流程"}</button><button type="button" data-task-action="adjust" data-application-id="${escapeHtml(task.task_id)}">调整安排</button><button type="button" data-task-action="delete" data-application-id="${escapeHtml(task.task_id)}">删除任务</button></div></details></div></div>
+      <div class="admin-task-head"><div><h3>${escapeHtml(task.candidate.display_name)}</h3><small>${escapeHtml(task.job.title)}</small></div><div class="admin-task-head-actions">${task.rounds.length ? `<button class="secondary compact" data-final-review="${escapeHtml(task.task_id)}">查看面试汇总</button>` : `<button class="primary compact" data-schedule-application="${escapeHtml(task.task_id)}">配置面试流程</button>`}<span class="pill">${task.current_stage === "interview_to_schedule" ? "待排期" : escapeHtml(task.current_stage)}</span><details class="task-actions-menu"><summary aria-label="更多任务操作">···</summary><div class="task-actions-popover"><button type="button" data-task-action="view" data-application-id="${escapeHtml(task.task_id)}">${task.rounds.length ? "查看详情" : "配置面试流程"}</button><button type="button" data-task-action="adjust" data-application-id="${escapeHtml(task.task_id)}">调整安排</button><button type="button" data-task-action="delete" data-application-id="${escapeHtml(task.task_id)}">删除</button></div></details></div></div>
       <div class="admin-rounds">${task.rounds.map((round) => {
         const selected = round.assignments[0]?.open_id || "";
         return `<section class="admin-round" data-admin-round="${round.id}">
@@ -1954,20 +1954,26 @@ async function handleTaskAction(event) {
 
 function openTaskDeleteDialog(task) {
   const deletion = task.deletion || {
-    allowed: task.rounds.length === 0,
-    reason: task.rounds.length ? "该任务已经安排面试，不能直接删除；如不再继续，请使用“取消本轮”。" : "",
+    allowed: true,
+    mode: task.rounds.length ? "archive" : "hard_delete",
+    preserves_history: task.rounds.length > 0,
+    reason: task.rounds.length
+      ? "删除后，该任务将从“最近的面试任务”中移除；已经产生的面试记录、评价和历史数据仍会保留。"
+      : "任务尚未开始且未产生正式面试数据，可以安全删除。",
   };
   state.taskDeletion = { task, deletion };
-  $("task-delete-title").textContent = deletion.allowed ? "删除面试任务？" : "不能直接删除该任务";
-  $("task-delete-copy").textContent = deletion.allowed
-    ? "删除后，这条面试任务将不再出现在招聘任务列表中。此操作不可直接撤销。"
-    : deletion.reason;
+  const isArchive = deletion.mode === "archive" || deletion.preserves_history;
+  $("task-delete-title").textContent = "删除这条面试任务？";
+  $("task-delete-copy").textContent = isArchive
+    ? "删除后，该任务将从“最近的面试任务”中移除。\n已经产生的面试记录、评价和历史数据仍会保留，以后仍可在候选人历史记录中查看。"
+    : "删除后，该任务将不再出现在面试任务列表中。";
   $("task-delete-candidate").textContent = task.candidate.display_name;
   $("task-delete-job").textContent = task.job.title;
   $("task-delete-feedback").textContent = "";
   $("task-delete-feedback").classList.add("hidden");
-  $("task-delete-confirm").classList.toggle("hidden", !deletion.allowed);
-  $("task-delete-cancel").textContent = deletion.allowed ? "取消" : "知道了";
+  $("task-delete-confirm").classList.remove("hidden");
+  $("task-delete-cancel").textContent = "取消";
+  $("task-delete-confirm").textContent = "删除";
   const dialog = $("task-delete-dialog");
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
@@ -1986,10 +1992,13 @@ async function confirmTaskDeletion() {
   const confirmButton = $("task-delete-confirm");
   confirmButton.disabled = true;
   try {
-    await api(`/api/v1/admin/applications/${current.task.task_id}?confirmed=true`, { method: "DELETE" });
+    const result = await api(`/api/v1/admin/applications/${current.task.task_id}?confirmed=true`, { method: "DELETE" });
+    const card = document.querySelector(`[data-admin-task="${CSS.escape(current.task.task_id)}"]`);
+    card?.remove();
+    state.adminTasks = state.adminTasks.filter((item) => item.task_id !== current.task.task_id);
     closeTaskDeleteDialog();
     await loadAdminTasks();
-    toast("面试任务已删除");
+    toast(result?.mode === "archived" ? "已从最近任务中移除，历史数据已保留" : "已从最近任务中移除");
   } catch (error) {
     confirmButton.disabled = false;
     $("task-delete-feedback").textContent = error.message;

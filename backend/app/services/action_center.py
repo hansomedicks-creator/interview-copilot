@@ -26,6 +26,17 @@ ROUND_LABELS = {
     "custom": "补充面试",
 }
 PRIMARY_ROUNDS = {"business", "hr", "ceo"}
+TERMINAL_APPLICATION_STAGES = {"closed_rejected", "offer_approval"}
+TERMINAL_APPLICATION_DECISIONS = {"reject", "offer_approval"}
+
+
+def application_is_active(application: Application) -> bool:
+    """Whether an application still belongs to the current hiring work queue."""
+    return not (
+        application.archived_at
+        or application.current_stage in TERMINAL_APPLICATION_STAGES
+        or application.human_final_decision in TERMINAL_APPLICATION_DECISIONS
+    )
 
 
 def build_personal_action_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
@@ -53,9 +64,11 @@ def build_personal_action_center(db: Session, user: dict[str, Any]) -> dict[str,
         if interview.status == "cancelled":
             continue
         application = db.get(Application, interview.application_id)
+        if not application or not application_is_active(application):
+            continue
         candidate = db.get(Candidate, application.candidate_id) if application else None
         job = db.get(Job, application.job_id) if application else None
-        if not application or not candidate or not job or candidate.source == "demo":
+        if not candidate or not job or candidate.source == "demo":
             continue
         if user["role"] == "hr" and interview.round_type != "hr":
             continue
@@ -128,6 +141,8 @@ def build_hr_action_center(db: Session) -> dict[str, Any]:
     included_application_ids: set[str] = set()
 
     for application in applications:
+        if not application_is_active(application):
+            continue
         candidate = db.get(Candidate, application.candidate_id)
         job = db.get(Job, application.job_id)
         if not candidate or not job or candidate.source == "demo":

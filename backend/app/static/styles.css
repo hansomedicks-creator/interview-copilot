@@ -1631,6 +1631,7 @@ body.role-admin .task-header > div > .kicker { display: none; }
   margin: 18px 0 0;
   color: var(--text-secondary);
   line-height: 1.7;
+  white-space: pre-line;
 }
 .task-delete-meta {
   display: grid;

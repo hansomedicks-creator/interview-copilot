@@ -22,6 +22,7 @@ from ..models import (
     utc_now,
 )
 from ..providers.feishu_notifications import FeishuNotificationError, FeishuNotificationSender
+from .action_center import application_is_active
 from .data_governance import record_audit_event
 
 
@@ -82,6 +83,8 @@ def sync_notification_queue(
 
     for interview in rounds:
         application = applications.get(interview.application_id)
+        if not application or not application_is_active(application):
+            continue
         candidate = candidates.get(application.candidate_id) if application else None
         job = jobs.get(application.job_id) if application else None
         if not candidate or not job:
@@ -151,7 +154,7 @@ def sync_notification_queue(
         rounds_by_application[item.application_id].append(item)
     for application_id, application_rounds in rounds_by_application.items():
         application = applications.get(application_id)
-        if not application or application.human_final_decision:
+        if not application or not application_is_active(application) or application.human_final_decision:
             continue
         required = [
             item for item in application_rounds

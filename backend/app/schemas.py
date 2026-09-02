@@ -82,6 +82,9 @@ class ApplicationRead(ORMModel):
     current_stage: str
     screening_payload: dict[str, Any]
     human_final_decision: str | None
+    archived_at: datetime | None = None
+    archived_by_open_id: str | None = None
+    archived_reason: str | None = None
 
 
 class ApplicationFinalDecision(BaseModel):

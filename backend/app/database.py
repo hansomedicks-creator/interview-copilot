@@ -74,6 +74,22 @@ class Database:
                     "WHERE interview_mode IS NULL OR interview_mode = ''"
                 )
             )
+        application_columns = {
+            item["name"] for item in inspect(self.engine).get_columns("applications")
+        }
+        with self.engine.begin() as connection:
+            if "archived_at" not in application_columns:
+                connection.execute(
+                    text("ALTER TABLE applications ADD COLUMN archived_at TIMESTAMP")
+                )
+            if "archived_by_open_id" not in application_columns:
+                connection.execute(
+                    text("ALTER TABLE applications ADD COLUMN archived_by_open_id VARCHAR(128)")
+                )
+            if "archived_reason" not in application_columns:
+                connection.execute(
+                    text("ALTER TABLE applications ADD COLUMN archived_reason VARCHAR(256)")
+                )
 
     def session(self) -> Iterator[Session]:
         with self.session_factory() as session:

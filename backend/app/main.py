@@ -99,7 +99,11 @@ from .schemas import (
 )
 from .services.planning import build_plan, prior_round_context
 from .services.job_semantics import build_local_job_semantic_profile
-from .services.action_center import build_hr_action_center, build_personal_action_center
+from .services.action_center import (
+    application_is_active,
+    build_hr_action_center,
+    build_personal_action_center,
+)
 from .services.interviewer_quality import build_interviewer_metrics, build_quality_overview
 from .services.knowledge_learning import generate_interview_knowledge_proposals
 from .services.knowledge_vault import KnowledgePublishError, inspect_vault, publish_proposal
@@ -524,7 +528,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             elif interview.scheduled_at and interview.scheduled_at.date() != today:
                 continue
             application = db.get(Application, interview.application_id)
-            if not application:
+            if not application or not application_is_active(application):
                 continue
             candidate = db.get(Candidate, application.candidate_id)
             job = db.get(Job, application.job_id)
@@ -1371,6 +1375,8 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         ).all()
         output = []
         for application in applications:
+            if not application_is_active(application):
+                continue
             candidate = db.get(Candidate, application.candidate_id)
             job = db.get(Job, application.job_id)
             if not candidate or not job or candidate.source == "demo":
@@ -1395,7 +1401,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         return output
 
     @app.delete("/api/v1/admin/applications/{application_id}")
-    def delete_unscheduled_application(
+    def remove_interview_task(
         application_id: str,
         request: Request,
         confirmed: bool = False,
@@ -1411,10 +1417,36 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             select(InterviewRound).where(InterviewRound.application_id == application.id)
         ).all()
         deletion = _application_deletion_status(db, application.id, rounds)
-        if not deletion["allowed"]:
-            raise HTTPException(409, deletion["reason"])
         candidate = db.get(Candidate, application.candidate_id)
         job = db.get(Job, application.job_id)
+        if deletion["mode"] == "archive":
+            application.archived_at = utc_now()
+            application.archived_by_open_id = user["open_id"]
+            application.archived_reason = "hr_removed_from_recent_tasks"
+            record_audit_event(
+                db,
+                user,
+                action="application.interview_task_archived",
+                resource_type="application",
+                resource_id=application.id,
+                details={
+                    "candidate_name": candidate.display_name if candidate else "unknown",
+                    "job_title": job.title if job else "unknown",
+                    "scope": "recent_interview_tasks",
+                    "historical_data_preserved": True,
+                    "round_count": len(rounds),
+                },
+            )
+            db.commit()
+            return {
+                "deleted": True,
+                "mode": "archived",
+                "archived": True,
+                "historical_data_preserved": True,
+                "application_id": application_id,
+                "candidate_deleted": False,
+            }
+
         reports = db.scalars(
             select(InterviewReportVersion).where(InterviewReportVersion.application_id == application.id)
         ).all()
@@ -1476,8 +1508,10 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         db.commit()
         return {
             "deleted": True,
+            "mode": "hard_deleted",
             "application_id": application_id,
             "candidate_deleted": bool(candidate and not has_other_application),
+            "historical_data_preserved": False,
         }
 
     @app.get("/api/v1/admin/action-center")
@@ -1598,6 +1632,16 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         }
         application.human_final_decision = payload.decision
         application.current_stage = stage_by_decision[payload.decision]
+        if payload.decision in {"reject", "offer_approval"}:
+            application.archived_at = utc_now()
+            application.archived_by_open_id = user["open_id"]
+            application.archived_reason = "final_decision_closed_workflow"
+        else:
+            # Re-opening a previously closed decision should put the task back
+            # into the active queue without touching its historical materials.
+            application.archived_at = None
+            application.archived_by_open_id = None
+            application.archived_reason = None
         screening_payload = dict(application.screening_payload or {})
         screening_payload["final_review"] = {
             "decision": payload.decision,
@@ -1627,6 +1671,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 "decision": payload.decision,
                 "new_stage": application.current_stage,
                 "profile_draft_created": bool(profile_draft),
+                "removed_from_recent_tasks": payload.decision in {"reject", "offer_approval"},
             },
         )
         db.commit()
@@ -3507,28 +3552,27 @@ def _application_deletion_status(
     application_id: str,
     rounds: list[InterviewRound] | None = None,
 ) -> dict[str, Any]:
-    """Return the smallest safe deletion decision for an HR task.
+    """Decide whether removing a task means hard delete or archive.
 
-    A task can only be hard-deleted while its rounds are still planned and no
-    interview material has been produced. Historical business actions remain
-    auditable; callers should cancel rather than delete those tasks.
+    The recent-task page is a work queue, not an archive. A task without any
+    formal interview activity can be hard-deleted; once an interview has
+    started or produced material, only the queue entry is archived so every
+    historical artifact and audit event remains available.
     """
     if rounds is None:
         rounds = db.scalars(
             select(InterviewRound).where(InterviewRound.application_id == application_id)
         ).all()
-    if any(
+
+    has_interview_activity = any(
         item.status in {"in_progress", "completed", "cancelled"}
         or item.started_at is not None
         or item.ended_at is not None
         for item in rounds
-    ):
-        return {
-            "allowed": False,
-            "reason": "该任务已经开始、完成或取消过面试，不能直接删除；如不再继续，请使用“取消本轮”。",
-        }
+    )
 
     round_ids = [item.id for item in rounds]
+    material_label = None
     if round_ids:
         round_materials = (
             (TranscriptSegment, TranscriptSegment.interview_round_id, "逐字稿"),
@@ -3546,22 +3590,25 @@ def _application_deletion_status(
                 .where(round_column.in_(round_ids))
                 .limit(1)
             ):
-                return {
-                    "allowed": False,
-                    "reason": f"该任务已经产生{label}，不能直接删除；如不再继续，请使用“取消本轮”。",
-                }
+                material_label = label
+                break
 
-    if db.scalar(
+    has_report = bool(db.scalar(
         select(InterviewReportVersion.id)
         .where(InterviewReportVersion.application_id == application_id)
         .limit(1)
-    ):
+    ))
+    if material_label or has_report or has_interview_activity:
         return {
-            "allowed": False,
-            "reason": "该任务已经产生报告，不能直接删除；如不再继续，请使用“取消本轮”。",
+            "allowed": True,
+            "mode": "archive",
+            "preserves_history": True,
+            "reason": "删除后，该任务将从“最近的面试任务”中移除；已经产生的面试记录、评价和历史数据仍会保留。",
         }
     return {
         "allowed": True,
+        "mode": "hard_delete",
+        "preserves_history": False,
         "reason": "任务尚未开始且未产生正式面试数据，可以安全删除。",
     }
 

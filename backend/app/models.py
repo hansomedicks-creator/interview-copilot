@@ -66,6 +66,9 @@ class Application(Base):
     current_stage: Mapped[str] = mapped_column(String(64), default="interview")
     screening_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     human_final_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    archived_by_open_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archived_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
