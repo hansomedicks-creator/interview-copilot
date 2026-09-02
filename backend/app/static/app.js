@@ -1933,6 +1933,46 @@ async function loadAdminTasks() {
   document.querySelectorAll("[data-schedule-application]").forEach((button) => button.addEventListener("click", () => scheduleImportedCandidate(tasks.find((task) => task.task_id === button.dataset.scheduleApplication))));
   document.querySelectorAll("[data-final-review]").forEach((button) => button.addEventListener("click", () => openFinalReview(button.dataset.finalReview)));
   document.querySelectorAll("[data-task-action]").forEach((button) => button.addEventListener("click", handleTaskAction));
+  bindTaskActionMenus();
+}
+
+function positionTaskActionMenu(menu) {
+  const popover = menu.querySelector(".task-actions-popover");
+  if (!popover || !menu.open) return;
+  popover.classList.remove("open-upward");
+  const rect = popover.getBoundingClientRect();
+  const bottomPadding = 12;
+  const canOpenUpward = rect.top > rect.height + bottomPadding;
+  popover.classList.toggle("open-upward", rect.bottom > window.innerHeight - bottomPadding && canOpenUpward);
+}
+
+function bindTaskActionMenus() {
+  document.querySelectorAll(".task-actions-menu").forEach((menu) => {
+    menu.addEventListener("toggle", () => {
+      const card = menu.closest(".admin-task");
+      if (!menu.open) {
+        card?.classList.remove("menu-open");
+        menu.querySelector(".task-actions-popover")?.classList.remove("open-upward");
+        return;
+      }
+      document.querySelectorAll(".task-actions-menu[open]").forEach((other) => {
+        if (other === menu) return;
+        other.removeAttribute("open");
+        other.closest(".admin-task")?.classList.remove("menu-open");
+      });
+      card?.classList.add("menu-open");
+      requestAnimationFrame(() => positionTaskActionMenu(menu));
+    });
+  });
+}
+
+function closeTaskActionMenus(event) {
+  if (event.target.closest?.(".task-actions-menu")) return;
+  document.querySelectorAll(".task-actions-menu[open]").forEach((menu) => menu.removeAttribute("open"));
+}
+
+function repositionTaskActionMenus() {
+  document.querySelectorAll(".task-actions-menu[open]").forEach(positionTaskActionMenu);
 }
 
 async function handleTaskAction(event) {
@@ -3363,6 +3403,9 @@ $("task-delete-close").addEventListener("click", closeTaskDeleteDialog);
 $("task-delete-cancel").addEventListener("click", closeTaskDeleteDialog);
 $("task-delete-confirm").addEventListener("click", confirmTaskDeletion);
 $("task-delete-dialog").addEventListener("cancel", () => { state.taskDeletion = null; });
+document.addEventListener("click", closeTaskActionMenus);
+window.addEventListener("resize", repositionTaskActionMenus);
+window.addEventListener("scroll", repositionTaskActionMenus, true);
 document.querySelectorAll("[data-dev-login]").forEach((button) => button.addEventListener("click", () => devLogin(button.dataset.devLogin)));
 $("task-form").addEventListener("submit", createInterviewTask);
 document.querySelectorAll("#task-form [data-round-enabled]").forEach((checkbox) => checkbox.addEventListener("change", updateTaskRoundFlow));

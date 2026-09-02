@@ -1405,8 +1405,22 @@ body.role-admin .task-header > div > .kicker { display: none; }
 .admin-list-heading h3 { margin: 0; font-size: 21px; }
 .admin-list-heading span { color: var(--text-tertiary); font-size: 12px; }
 .admin-task-list { gap: 12px; }
-.admin-task { border-color: var(--separator); border-radius: 14px; background: var(--bg-panel); }
-.admin-task-head { padding: 15px 18px; border-bottom: 1px solid var(--separator); background: var(--bg-panel); }
+.admin-task {
+  position: relative;
+  overflow: visible;
+  border-color: var(--separator);
+  border-radius: 14px;
+  background: var(--bg-panel);
+}
+.admin-task:has(.task-actions-menu[open]), .admin-task.menu-open { z-index: 20; }
+.admin-task-head {
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--separator);
+  border-radius: 14px 14px 0 0;
+  background: var(--bg-panel);
+}
+.admin-task:has(.admin-rounds:empty) .admin-task-head { border-radius: 14px; }
+.admin-rounds { overflow: hidden; border-radius: 0 0 14px 14px; }
 .admin-task-head h3 { font-size: 17px; }
 .admin-task-head > div:last-child .pill { color: var(--text-secondary); background: #f1f1f3; }
 .admin-round { padding: 15px 18px; border-color: var(--separator); }
@@ -1545,7 +1559,7 @@ body.role-admin .task-header > div > .kicker { display: none; }
 }
 .task-actions-menu {
   position: relative;
-  z-index: 3;
+  z-index: 100;
 }
 .task-actions-menu > summary {
   display: grid;
@@ -1572,12 +1586,17 @@ body.role-admin .task-header > div > .kicker { display: none; }
   position: absolute;
   top: calc(100% + 5px);
   right: 0;
+  z-index: 100;
   min-width: 138px;
   padding: 5px;
   border: 1px solid var(--separator);
   border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 12px 28px rgba(38, 32, 67, .12);
+}
+.task-actions-popover.open-upward {
+  top: auto;
+  bottom: calc(100% + 5px);
 }
 .task-actions-popover button {
   display: block;
