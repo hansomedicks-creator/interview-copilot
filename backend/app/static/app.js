@@ -45,6 +45,7 @@ const state = {
   personalActions: null,
   hrActions: null,
   adminTasks: [],
+  taskDeletion: null,
   reportCenter: null,
   report: null,
   reportApplicationId: null,
@@ -1910,8 +1911,8 @@ async function loadAdminTasks() {
     ? tasks.filter((task) => task.current_stage === "final_review")
     : tasks;
   const taskRows = visibleTasks.map((task) => `
-    <article class="admin-task">
-      <div class="admin-task-head"><div><h3>${escapeHtml(task.candidate.display_name)}</h3><small>${escapeHtml(task.job.title)}</small></div><div>${task.rounds.length ? `<button class="secondary compact" data-final-review="${escapeHtml(task.task_id)}">查看面试汇总</button>` : `<button class="primary compact" data-schedule-application="${escapeHtml(task.task_id)}">配置面试流程</button><button class="danger compact" data-delete-application="${escapeHtml(task.task_id)}" data-candidate-name="${escapeHtml(task.candidate.display_name)}">删除误导入候选人</button>`}<span class="pill">${task.current_stage === "interview_to_schedule" ? "待排期" : escapeHtml(task.current_stage)}</span></div></div>
+    <article class="admin-task" data-admin-task="${escapeHtml(task.task_id)}">
+      <div class="admin-task-head"><div><h3>${escapeHtml(task.candidate.display_name)}</h3><small>${escapeHtml(task.job.title)}</small></div><div class="admin-task-head-actions">${task.rounds.length ? `<button class="secondary compact" data-final-review="${escapeHtml(task.task_id)}">查看面试汇总</button>` : `<button class="primary compact" data-schedule-application="${escapeHtml(task.task_id)}">配置面试流程</button>`}<span class="pill">${task.current_stage === "interview_to_schedule" ? "待排期" : escapeHtml(task.current_stage)}</span><details class="task-actions-menu"><summary aria-label="更多任务操作">···</summary><div class="task-actions-popover"><button type="button" data-task-action="view" data-application-id="${escapeHtml(task.task_id)}">${task.rounds.length ? "查看详情" : "配置面试流程"}</button><button type="button" data-task-action="adjust" data-application-id="${escapeHtml(task.task_id)}">调整安排</button><button type="button" data-task-action="delete" data-application-id="${escapeHtml(task.task_id)}">删除任务</button></div></details></div></div>
       <div class="admin-rounds">${task.rounds.map((round) => {
         const selected = round.assignments[0]?.open_id || "";
         return `<section class="admin-round" data-admin-round="${round.id}">
@@ -1931,17 +1932,69 @@ async function loadAdminTasks() {
   document.querySelectorAll("[data-cancel-round]").forEach((button) => button.addEventListener("click", cancelManagedRound));
   document.querySelectorAll("[data-schedule-application]").forEach((button) => button.addEventListener("click", () => scheduleImportedCandidate(tasks.find((task) => task.task_id === button.dataset.scheduleApplication))));
   document.querySelectorAll("[data-final-review]").forEach((button) => button.addEventListener("click", () => openFinalReview(button.dataset.finalReview)));
-  document.querySelectorAll("[data-delete-application]").forEach((button) => button.addEventListener("click", deleteUnscheduledApplication));
+  document.querySelectorAll("[data-task-action]").forEach((button) => button.addEventListener("click", handleTaskAction));
 }
 
-async function deleteUnscheduledApplication(event) {
+async function handleTaskAction(event) {
   const button = event.currentTarget;
-  if (!confirm(`确认删除“${button.dataset.candidateName}”的误导入档案吗？此操作不可恢复。`)) return;
+  const task = state.adminTasks.find((item) => item.task_id === button.dataset.applicationId);
+  if (!task) return;
+  button.closest("details")?.removeAttribute("open");
+  if (button.dataset.taskAction === "delete") return openTaskDeleteDialog(task);
+  if (button.dataset.taskAction === "view") {
+    if (task.rounds.length) return openFinalReview(task.task_id);
+    return scheduleImportedCandidate(task);
+  }
+  const card = document.querySelector(`[data-admin-task="${CSS.escape(task.task_id)}"]`);
+  if (!task.rounds.length) return scheduleImportedCandidate(task);
+  card?.scrollIntoView({ behavior: "smooth", block: "center" });
+  card?.querySelector("[data-manage-time]")?.focus({ preventScroll: true });
+  toast("已定位到该任务的面试安排，可直接调整时间、面试官或面试方式");
+}
+
+function openTaskDeleteDialog(task) {
+  const deletion = task.deletion || {
+    allowed: task.rounds.length === 0,
+    reason: task.rounds.length ? "该任务已经安排面试，不能直接删除；如不再继续，请使用“取消本轮”。" : "",
+  };
+  state.taskDeletion = { task, deletion };
+  $("task-delete-title").textContent = deletion.allowed ? "删除面试任务？" : "不能直接删除该任务";
+  $("task-delete-copy").textContent = deletion.allowed
+    ? "删除后，这条面试任务将不再出现在招聘任务列表中。此操作不可直接撤销。"
+    : deletion.reason;
+  $("task-delete-candidate").textContent = task.candidate.display_name;
+  $("task-delete-job").textContent = task.job.title;
+  $("task-delete-feedback").textContent = "";
+  $("task-delete-feedback").classList.add("hidden");
+  $("task-delete-confirm").classList.toggle("hidden", !deletion.allowed);
+  $("task-delete-cancel").textContent = deletion.allowed ? "取消" : "知道了";
+  const dialog = $("task-delete-dialog");
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeTaskDeleteDialog() {
+  const dialog = $("task-delete-dialog");
+  if (dialog.open && typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+  state.taskDeletion = null;
+}
+
+async function confirmTaskDeletion() {
+  const current = state.taskDeletion;
+  if (!current?.deletion.allowed) return closeTaskDeleteDialog();
+  const confirmButton = $("task-delete-confirm");
+  confirmButton.disabled = true;
   try {
-    await api(`/api/v1/admin/applications/${button.dataset.deleteApplication}?confirmed=true`, { method: "DELETE" });
+    await api(`/api/v1/admin/applications/${current.task.task_id}?confirmed=true`, { method: "DELETE" });
+    closeTaskDeleteDialog();
     await loadAdminTasks();
-    toast("误导入候选人已删除");
-  } catch (error) { toast(error.message, true); }
+    toast("面试任务已删除");
+  } catch (error) {
+    confirmButton.disabled = false;
+    $("task-delete-feedback").textContent = error.message;
+    $("task-delete-feedback").classList.remove("hidden");
+  }
 }
 
 async function openFinalReview(applicationId) {
@@ -3296,6 +3349,10 @@ $("report-copy-link-btn").addEventListener("click", copyReportLink);
 $("final-decision-form").addEventListener("submit", submitFinalDecision);
 $("scorecard-refresh-btn").addEventListener("click", regenerateScorecard);
 $("logout-btn").addEventListener("click", logout);
+$("task-delete-close").addEventListener("click", closeTaskDeleteDialog);
+$("task-delete-cancel").addEventListener("click", closeTaskDeleteDialog);
+$("task-delete-confirm").addEventListener("click", confirmTaskDeletion);
+$("task-delete-dialog").addEventListener("cancel", () => { state.taskDeletion = null; });
 document.querySelectorAll("[data-dev-login]").forEach((button) => button.addEventListener("click", () => devLogin(button.dataset.devLogin)));
 $("task-form").addEventListener("submit", createInterviewTask);
 document.querySelectorAll("#task-form [data-round-enabled]").forEach((checkbox) => checkbox.addEventListener("change", updateTaskRoundFlow));

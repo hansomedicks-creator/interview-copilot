@@ -3480,6 +3480,105 @@ def test_resume_import_and_unscheduled_candidate_can_be_deleted(tmp_path):
         assert all(item["task_id"] != application_id for item in client.get("/api/v1/admin/interview-tasks").json())
 
 
+def test_hr_can_delete_unstarted_task_but_started_task_is_protected(tmp_path):
+    with make_client(tmp_path) as client:
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+        payload = {
+            "candidate_name": "待删除任务候选人",
+            "resume_text": "尚未开始面试。",
+            "job_title": "任务删除测试岗位",
+            "jd_text": "负责日常业务执行与跨团队协作。",
+            "rounds": [
+                {
+                    "round_type": "business",
+                    "interviewer_names": ["业务负责人"],
+                    "interviewer_open_ids": ["dev-business"],
+                    "scheduled_at": start.isoformat(),
+                }
+            ],
+        }
+        created = client.post("/api/v1/interview-tasks", json=payload)
+        assert created.status_code == 201
+        application_id = created.json()["task_id"]
+        round_id = created.json()["rounds"][0]["id"]
+        task = next(
+            item
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+            if item["task_id"] == application_id
+        )
+        assert task["deletion"]["allowed"] is True
+        deleted = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+        assert client.get(f"/api/v1/interviews/{round_id}").status_code == 404
+        assert all(
+            item["task_id"] != application_id
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+        )
+
+        started = client.post(
+            "/api/v1/interview-tasks",
+            json={
+                **payload,
+                "candidate_name": "已开始任务候选人",
+                "rounds": [
+                    {
+                        **payload["rounds"][0],
+                        "scheduled_at": (start + timedelta(hours=1)).isoformat(),
+                    }
+                ],
+            },
+        )
+        assert started.status_code == 201
+        started_id = started.json()["task_id"]
+        started_round_id = started.json()["rounds"][0]["id"]
+        acknowledge_and_start(client, started_round_id)
+        protected = next(
+            item
+            for item in client.get("/api/v1/admin/interview-tasks").json()
+            if item["task_id"] == started_id
+        )
+        assert protected["deletion"]["allowed"] is False
+        assert "不能直接删除" in protected["deletion"]["reason"]
+        blocked = client.delete(f"/api/v1/admin/applications/{started_id}?confirmed=true")
+        assert blocked.status_code == 409
+        assert "不能直接删除" in blocked.json()["detail"]
+
+
+def test_interviewer_cannot_delete_hr_interview_task(tmp_path):
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'development.db'}",
+        settings=Settings(environment="development", recording_dir=tmp_path / "recordings"),
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-hr"}).status_code == 200
+        created = client.post(
+            "/api/v1/interview-tasks",
+            json={
+                "candidate_name": "权限测试任务候选人",
+                "resume_text": "尚未开始面试。",
+                "job_title": "权限测试岗位",
+                "jd_text": "负责日常业务执行。",
+                "rounds": [
+                    {
+                        "round_type": "hr",
+                        "interviewer_names": ["开发环境 HR"],
+                        "interviewer_open_ids": ["dev-hr"],
+                        "scheduled_at": (
+                            datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+                        ).isoformat(),
+                    }
+                ],
+            },
+        )
+        assert created.status_code == 201
+        application_id = created.json()["task_id"]
+        assert client.post("/api/v1/auth/logout").status_code == 204
+        assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-business"}).status_code == 200
+        forbidden = client.delete(f"/api/v1/admin/applications/{application_id}?confirmed=true")
+        assert forbidden.status_code == 403
+
+
 def test_future_assigned_interview_is_visible_in_seven_day_agenda(tmp_path):
     app = create_app(
         database_url=f"sqlite:///{tmp_path / 'future-agenda.db'}",

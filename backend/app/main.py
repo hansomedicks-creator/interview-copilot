@@ -48,6 +48,7 @@ from .models import (
     ResumeImportBatch,
     ResumeImportItem,
     Scorecard,
+    SpeakerRoleMapping,
     TalentProfileVersion,
     TranscriptSegment,
     UserIdentity,
@@ -1379,6 +1380,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 .where(InterviewRound.application_id == application.id)
                 .order_by(InterviewRound.scheduled_at)
             ).all()
+            deletion = _application_deletion_status(db, application.id, rounds)
             output.append(
                 {
                     "task_id": application.id,
@@ -1386,6 +1388,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                     "job": {"id": job.id, "title": job.title, "jd_text": job.jd_text, "source_job_code": job.source_job_code},
                     "current_stage": application.current_stage,
                     "rounds": [_managed_round_payload(db, item) for item in rounds],
+                    "deletion": deletion,
                     "created_at": application.created_at,
                 }
             )
@@ -1407,8 +1410,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         rounds = db.scalars(
             select(InterviewRound).where(InterviewRound.application_id == application.id)
         ).all()
-        if rounds:
-            raise HTTPException(409, "scheduled candidates cannot be deleted here; cancel the interview flow first")
+        deletion = _application_deletion_status(db, application.id, rounds)
+        if not deletion["allowed"]:
+            raise HTTPException(409, deletion["reason"])
         candidate = db.get(Candidate, application.candidate_id)
         job = db.get(Job, application.job_id)
         reports = db.scalars(
@@ -1416,7 +1420,27 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         ).all()
         for report in reports:
             db.delete(report)
-        if candidate:
+        for interview in rounds:
+            assignments = db.scalars(
+                select(InterviewAssignment).where(
+                    InterviewAssignment.interview_round_id == interview.id
+                )
+            ).all()
+            for assignment in assignments:
+                db.delete(assignment)
+            db.delete(interview)
+        has_other_application = bool(
+            candidate
+            and db.scalar(
+                select(Application.id)
+                .where(
+                    Application.candidate_id == candidate.id,
+                    Application.id != application.id,
+                )
+                .limit(1)
+            )
+        )
+        if candidate and not has_other_application:
             profile = db.scalar(
                 select(CandidateProfile).where(CandidateProfile.candidate_id == candidate.id)
             )
@@ -1435,23 +1459,26 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         record_audit_event(
             db,
             user,
-            action="application.unscheduled_deleted",
+            action="application.interview_task_deleted",
             resource_type="application",
             resource_id=application.id,
             details={
                 "candidate_name": candidate.display_name if candidate else "unknown",
                 "job_title": job.title if job else "unknown",
-                "scope": "unscheduled_candidate_profile",
+                "scope": "interview_task",
+                "round_count": len(rounds),
             },
         )
         db.delete(application)
         db.flush()
-        if candidate and not db.scalar(
-            select(Application).where(Application.candidate_id == candidate.id)
-        ):
+        if candidate and not has_other_application:
             db.delete(candidate)
         db.commit()
-        return {"deleted": True, "application_id": application_id}
+        return {
+            "deleted": True,
+            "application_id": application_id,
+            "candidate_deleted": bool(candidate and not has_other_application),
+        }
 
     @app.get("/api/v1/admin/action-center")
     def hr_action_center(
@@ -3472,6 +3499,70 @@ def _managed_round_payload(db: Session, interview: InterviewRound) -> dict[str, 
             {"open_id": item.user_open_id, "display_name": item.display_name}
             for item in assignments
         ],
+    }
+
+
+def _application_deletion_status(
+    db: Session,
+    application_id: str,
+    rounds: list[InterviewRound] | None = None,
+) -> dict[str, Any]:
+    """Return the smallest safe deletion decision for an HR task.
+
+    A task can only be hard-deleted while its rounds are still planned and no
+    interview material has been produced. Historical business actions remain
+    auditable; callers should cancel rather than delete those tasks.
+    """
+    if rounds is None:
+        rounds = db.scalars(
+            select(InterviewRound).where(InterviewRound.application_id == application_id)
+        ).all()
+    if any(
+        item.status in {"in_progress", "completed", "cancelled"}
+        or item.started_at is not None
+        or item.ended_at is not None
+        for item in rounds
+    ):
+        return {
+            "allowed": False,
+            "reason": "该任务已经开始、完成或取消过面试，不能直接删除；如不再继续，请使用“取消本轮”。",
+        }
+
+    round_ids = [item.id for item in rounds]
+    if round_ids:
+        round_materials = (
+            (TranscriptSegment, TranscriptSegment.interview_round_id, "逐字稿"),
+            (AudioRecording, AudioRecording.interview_round_id, "录音"),
+            (EvidenceItem, EvidenceItem.interview_round_id, "证据"),
+            (Scorecard, Scorecard.interview_round_id, "评价"),
+            (InterviewerQualityReview, InterviewerQualityReview.interview_round_id, "面试质量复盘"),
+            (InterviewQuestionProgress, InterviewQuestionProgress.interview_round_id, "问题记录"),
+            (SpeakerRoleMapping, SpeakerRoleMapping.interview_round_id, "说话人记录"),
+            (KnowledgeProposal, KnowledgeProposal.source_round_id, "知识提案"),
+        )
+        for model, round_column, label in round_materials:
+            if db.scalar(
+                select(model.id)
+                .where(round_column.in_(round_ids))
+                .limit(1)
+            ):
+                return {
+                    "allowed": False,
+                    "reason": f"该任务已经产生{label}，不能直接删除；如不再继续，请使用“取消本轮”。",
+                }
+
+    if db.scalar(
+        select(InterviewReportVersion.id)
+        .where(InterviewReportVersion.application_id == application_id)
+        .limit(1)
+    ):
+        return {
+            "allowed": False,
+            "reason": "该任务已经产生报告，不能直接删除；如不再继续，请使用“取消本轮”。",
+        }
+    return {
+        "allowed": True,
+        "reason": "任务尚未开始且未产生正式面试数据，可以安全删除。",
     }
 
 
