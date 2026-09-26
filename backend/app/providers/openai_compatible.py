@@ -24,6 +24,7 @@ from ..models import (
 )
 from ..services.company_profile import active_company_profile
 from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, is_clarification_response
+from ..services.answer_review_batches import answer_batches, logical_turns, merge_reviews, payload_size, review_payload
 from ..services.evaluation_scope import round_evaluation_dimensions
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
@@ -694,7 +695,51 @@ class OpenAICompatibleProvider:
         job: Job,
         segments: list[TranscriptSegment],
     ) -> None:
-        local_review = baseline.get("recommendation", {}).get("answer_logic_review")
+        batches, oversized = answer_batches(segments, job.title, interview.round_type,
+                                             self.settings.llm_max_context_chars)
+        coverage = {"total_batches": len(batches), "completed_batches": 0, "failed_batches": 0,
+                    "oversized_segment_ids": oversized, "reviewed_segment_ids": [], "failed_segment_ids": []}
+        reviews = []
+        for index, batch in enumerate(batches):
+            try:
+                review = self._review_answer_batch(interview, job, batch)
+            except IntelligenceProviderError:
+                coverage["failed_batches"] += 1
+                coverage["failed_segment_ids"].extend(row.id for row in batch)
+                continue
+            coverage["completed_batches"] += 1
+            coverage["reviewed_segment_ids"].extend(row.id for row in batch)
+            if review:
+                review["batch_index"] = index
+                reviews.append(review)
+        merged = merge_reviews(reviews, coverage)
+        if len(reviews) > 1:
+            cross_flags, cross_status = self._cross_batch_answer_review(interview, job, segments, reviews)
+            merged["cross_batch_status"] = cross_status
+            existing = {(flag["flag_type"], tuple(sorted(flag["segment_ids"]))) for flag in merged["consistency_flags"]}
+            for flag in cross_flags:
+                key = (flag["flag_type"], tuple(sorted(flag["segment_ids"])))
+                if key not in existing:
+                    merged["consistency_flags"].append(flag)
+                    existing.add(key)
+                    if flag["verification_question"] not in merged["verification_questions"]:
+                        merged["verification_questions"].append(flag["verification_question"])
+            if cross_status["pending_checks"]:
+                merged["summary"] += " 跨段原话核对仍有未完成项，不能视为前后一致性已全部确认。"
+        baseline["recommendation"]["answer_logic_review"] = merged
+        # Always replace the earlier short-context score, including partial failure.
+        baseline["recommendation"]["response_quality"] = {
+            "score": merged["logic_score"], "label": merged["label"], "confidence": merged["confidence"],
+            "rationale": merged["summary"], "evidence_segment_ids": merged["evidence_segment_ids"],
+            "boundary": ANSWER_LOGIC_BOUNDARY,
+        }
+
+    def _review_answer_batch(
+        self,
+        interview: InterviewRound,
+        job: Job,
+        segments: list[TranscriptSegment],
+    ) -> dict[str, Any] | None:
         candidate_count = sum(
             item.speaker_role == "candidate"
             and (is_evidence_worthy_utterance(item.effective_text) or is_clarification_response(item.effective_text))
@@ -719,40 +764,82 @@ class OpenAICompatibleProvider:
                     "回答没有涉及某项内容属于 unknown，不是风险。没有真实异常时 consistency_flags 必须为空。"
                     "logic_score 只评价本轮回答文本的逻辑可追溯程度，不得直接用于录用或淘汰决定。"
                 ),
-                payload={
-                    "job_title_context_only": job.title,
-                    "round_type": interview.round_type,
-                    "transcript": [
-                        {
-                            "segment_id": item.id,
-                            "speaker_role": item.speaker_role,
-                            "text": item.effective_text,
-                        }
-                        for item in segments
-                    ],
-                },
+                payload=review_payload(job.title, interview.round_type, segments),
                 schema_name="answer_logic_and_consistency_review",
                 schema=_answer_logic_schema(),
                 timeout_seconds=max(self.settings.llm_timeout_seconds, 35),
                 max_tokens=2200,
                 model=self._planning_model(),
             )
-        except IntelligenceProviderError as error:
-            if isinstance(local_review, dict):
-                local_review["status"] = "semantic_unavailable"
-                local_review["error_code"] = error.code
-                local_review["summary"] = "语义一致性核验暂未完成；不会使用本地关键词或语音表现替代判断。"
-            return
+        except IntelligenceProviderError:
+            raise
+        if not isinstance(output.get("sufficient_evidence"), bool):
+            raise IntelligenceProviderError("invalid_answer_review", "Answer review result is incomplete")
         validated = self._validated_answer_logic(output, segments)
-        if validated is not None:
-            baseline["recommendation"]["answer_logic_review"] = validated
-            if any(item["id"] == "response_relevance" for item in validated["dimensions"]):
-                baseline["recommendation"]["response_quality"] = {
-                    "score": validated["logic_score"], "label": "问题理解与回答质量",
-                    "confidence": validated["confidence"], "rationale": validated["summary"],
-                    "evidence_segment_ids": validated["evidence_segment_ids"],
-                    "boundary": "仅评价本轮回答表现，不推断智力、人格或长期潜力。",
-                }
+        if output.get("sufficient_evidence") and validated is None:
+            raise IntelligenceProviderError("invalid_answer_evidence", "Answer review references could not be verified")
+        return validated
+
+    def _cross_batch_answer_review(self, interview, job, segments, reviews):
+        """Nominate from bounded evidence quotes; only raw Q&A can confirm a flag."""
+        by_id = {row.id: row for row in segments}
+        batch_by_id = {sid: review["batch_index"] for review in reviews for sid in review["evidence_segment_ids"]}
+        facts = [{"segment_id": sid, "batch": batch_by_id[sid],
+                  "quote": best_substantive_quote(by_id[sid].effective_text, max_chars=180)}
+                 for sid in batch_by_id if sid in by_id]
+        facts = [fact for fact in facts if fact["quote"]]
+        # Each page uses less than half the request budget. Compare every page
+        # pair so the beginning and end can meet without sending full transcripts.
+        pages, page = [], []
+        budget = (self.settings.llm_max_context_chars - 300) // 2
+        for fact in facts:
+            if page and payload_size({"facts": page + [fact], "transcript": []}) > budget:
+                pages.append(page)
+                page = []
+            page.append(fact)
+        if page:
+            pages.append(page)
+        windows = [pages[0]] if len(pages) == 1 else [pages[i] + pages[j] for i in range(len(pages)) for j in range(i + 1, len(pages))]
+        status = {"scope": "validated_evidence_quotes", "total_windows": len(windows), "completed_windows": 0,
+                  "verified_pairs": 0, "pending_checks": 0, "pending_pairs": []}
+        nominated = set()
+        pair_schema = {"type": "object", "additionalProperties": False, "properties": {"pairs": {
+            "type": "array", "maxItems": 6, "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}}}, "required": ["pairs"]}
+        for facts_window in windows:
+            try:
+                output = self._chat_json(
+                    instructions="比较不同批次的候选人证据摘录，仅找出可能涉及同一事实且口径不同的两条 segment_id。摘录不是完整语境，不得在此认定矛盾或评分。没有需核对项返回空 pairs；不得基于年龄、人格或语音表现推断。",
+                    payload={"facts": facts_window, "transcript": []}, schema_name="answer_cross_batch_candidates", schema=pair_schema,
+                    model=self._planning_model(), max_tokens=600)
+                if not isinstance(output.get("pairs"), list):
+                    raise IntelligenceProviderError("invalid_cross_review", "Cross-batch nomination is incomplete")
+                allowed = {fact["segment_id"] for fact in facts_window}
+                for pair in output.get("pairs", []):
+                    if isinstance(pair, list) and len(pair) == 2 and all(isinstance(sid, str) and sid in allowed for sid in pair) and batch_by_id[pair[0]] != batch_by_id[pair[1]]:
+                        nominated.add(tuple(sorted(pair)))
+                status["completed_windows"] += 1
+            except IntelligenceProviderError:
+                status["pending_checks"] += 1
+        turns = logical_turns(segments)
+        flags = []
+        for pair in sorted(nominated):
+            # Include all intervening Q&A: a correction between two claims must
+            # not be hidden by cherry-picking the two endpoints.
+            indexes = [i for i, turn in enumerate(turns) if any(row.id in pair for row in turn)]
+            rows = [row for turn in turns[min(indexes):max(indexes) + 1] for row in turn]
+            if payload_size(review_payload(job.title, interview.round_type, rows)) > self.settings.llm_max_context_chars:
+                status["pending_checks"] += 1
+                status["pending_pairs"].append({"segment_ids": list(pair), "quotes": quotes_for_segments(list(pair), by_id), "reason": "相关原话及中间澄清语境超出单次上限，未认定矛盾"})
+                continue
+            try:
+                review = self._review_answer_batch(interview, job, rows)
+                status["verified_pairs"] += 1
+                if review:
+                    flags.extend(flag for flag in review["consistency_flags"] if set(pair).issubset(flag["segment_ids"]))
+            except IntelligenceProviderError:
+                status["pending_checks"] += 1
+                status["pending_pairs"].append({"segment_ids": list(pair), "quotes": quotes_for_segments(list(pair), by_id), "reason": "原话复核请求未完成，未认定矛盾"})
+        return flags, status
 
     @staticmethod
     def _validated_answer_logic(
@@ -1144,7 +1231,8 @@ class OpenAICompatibleProvider:
                         "job_title": job.title,
                         "jd_reference": job.jd_text[:2600],
                         "configured_round_type": interview.round_type,
-                        "answer_quality_review": response_review,
+                        "answer_quality_review": ({key: response_review.get(key) for key in
+                            ("status", "logic_score", "confidence", "summary")} if response_review else None),
                         "actual_interviewers": list(interview.interviewer_names or []),
                         "batch": {"index": index + 1, "total": len(batches)},
                         "transcript": [

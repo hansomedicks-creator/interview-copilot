@@ -1909,6 +1909,10 @@ def test_semantic_final_review_scores_freeform_dialogue_without_planned_question
                 for item in payload.get("transcript", [])
                 if item["speaker_role"] == "candidate"
             ]
+            if schema_name == "answer_logic_and_consistency_review":
+                return {"sufficient_evidence": True, "logic_score": 4, "confidence": .8,
+                        "dimensions": [{"id": "causal_coherence", "status": "coherent",
+                            "explanation": "原话交代了核对顺序与检查过程", "segment_ids": candidate_ids}]}
             if schema_name == "full_conversation_competency_assessment":
                 return {
                     "competency_assessments": [

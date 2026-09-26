@@ -3257,6 +3257,10 @@ function renderAnswerLogicReview(review = {}) {
       <small><strong>建议核实：</strong>${escapeHtml(item.verification_question || "请候选人澄清前后口径。")}</small>
     </article>`).join("")}</div>` : `<div class="logic-no-conflict">当前没有发现能够由候选人原话直接支持的明显矛盾。没有发现矛盾不代表所有经历已经完成外部验证。</div>`;
   const questions = review.verification_questions || [];
+  const batch = review.batch_status;
+  const cross = review.cross_batch_status;
+  const pendingHtml = cross?.pending_pairs?.length ? `<details><summary>查看尚未完成原话核对的 ${cross.pending_pairs.length} 项（不是已确认矛盾）</summary>${cross.pending_pairs.map(item => `<article><p>${escapeHtml(item.reason)}</p>${(item.quotes || []).map(quote => `<blockquote>${escapeHtml(quote.quote)}</blockquote>`).join("")}</article>`).join("")}</details>` : "";
+  const coverageHtml = batch ? `<p class="response-boundary">问答分析：${Number(batch.completed_batches)}/${Number(batch.total_batches)} 批完成${batch.failed_batches ? `；${Number(batch.failed_batches)} 批失败，待重试` : ""}${batch.oversized_segment_ids?.length ? `；${batch.oversized_segment_ids.length} 个片段所在问答超长，尚未分析` : ""}。${cross ? `跨段核对：已完成 ${Number(cross.completed_windows)}/${Number(cross.total_windows)} 组证据摘录比较、${Number(cross.verified_pairs)} 组原话复核${cross.pending_checks ? `；${Number(cross.pending_checks)} 项尚未完成` : ""}。跨段比较只覆盖提取出的证据，不代表全部事实已被验证。` : ""}</p>` : "";
   const questionsHtml = questions.length ? `<div class="logic-verification"><strong>后续可核实</strong><ul>${questions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : "";
   $("answer-logic-review").innerHTML = `
     <div class="logic-overview">
@@ -3264,7 +3268,7 @@ function renderAnswerLogicReview(review = {}) {
       <div><small>${escapeHtml(review.label || "回答逻辑核验")}</small><p>${escapeHtml(review.summary || "")}</p></div>
       <span>分析置信度 ${Math.round((review.confidence || 0) * 100)}%</span>
     </div>
-    ${dimensionsHtml}${flagsHtml}${questionsHtml}
+    ${coverageHtml}${pendingHtml}${dimensionsHtml}${flagsHtml}${questionsHtml}
     <p class="logic-boundary">${escapeHtml(review.boundary || "不能仅凭面试表现判断候选人是否撒谎；异常项只用于人工核实。")}</p>`;
 }
 
