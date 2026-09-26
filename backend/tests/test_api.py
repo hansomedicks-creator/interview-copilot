@@ -561,7 +561,7 @@ def test_development_roles_filter_assigned_today_interviews(tmp_path):
     with TestClient(app) as client:
         login = client.post("/api/v1/auth/dev-login", json={"open_id": "dev-hr"})
         assert login.status_code == 200
-        start = datetime.now().replace(microsecond=0) + timedelta(hours=1)
+        start = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
         payload = {
             "candidate_name": "权限测试候选人",
             "resume_text": "有业务运营经验",
@@ -595,7 +595,7 @@ def test_hr_today_workspace_only_lists_rounds_assigned_to_that_hr(tmp_path):
     )
     with TestClient(app) as client:
         assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-hr"}).status_code == 200
-        start = datetime.now().replace(microsecond=0) + timedelta(hours=1)
+        start = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
         payload = {
             "candidate_name": "HR 入口测试候选人",
             "resume_text": "有完整工作经历",
@@ -624,7 +624,7 @@ def test_hr_workspace_never_routes_to_business_even_if_misassigned(tmp_path):
     )
     with TestClient(app) as client:
         assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-hr"}).status_code == 200
-        start = datetime.now().replace(microsecond=0) + timedelta(hours=1)
+        start = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
         payload = {
             "candidate_name": "错误分配测试候选人", "resume_text": "简历", "job_title": "岗位", "jd_text": "要求",
             "rounds": [
@@ -647,7 +647,7 @@ def test_locked_management_report_is_visible_to_assigned_interviewer_only_withou
     )
     with TestClient(app) as client:
         assert client.post("/api/v1/auth/dev-login", json={"open_id": "dev-hr"}).status_code == 200
-        today = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
         created = client.post(
             "/api/v1/interview-tasks",
             json={
@@ -804,6 +804,10 @@ def test_production_llm_adapter_adds_validated_suggestions_and_rejects_fabricate
         assert capabilities["llm"]["model"] == "interview-model"
         interview_id = bootstrap(client)["active_interview_id"]
         acknowledge_and_start(client, interview_id)
+        assert client.post(f"/api/v1/interviews/{interview_id}/segments", json={
+            "speaker_role": "interviewer", "start_ms": 0, "end_ms": 100,
+            "text": "你负责的项目中，为什么这样调整执行顺序？", "is_final": True,
+        }).status_code == 201
         with client.websocket_connect(f"/ws/interviews/{interview_id}/live") as socket:
             socket.send_json(
                 {
@@ -811,7 +815,7 @@ def test_production_llm_adapter_adds_validated_suggestions_and_rejects_fabricate
                     "payload": {
                         "speaker_role": "candidate",
                         "speaker_confidence": 1,
-                        "start_ms": 0,
+                        "start_ms": 101,
                         "end_ms": 5000,
                         "text": "我负责整理每周风险，并根据数据调整执行顺序。",
                         "is_final": True,
@@ -1119,6 +1123,10 @@ def test_live_semantic_analysis_uses_company_behavior_rubric_without_keyword_dep
 
         interview_id = bootstrapped["active_interview_id"]
         acknowledge_and_start(client, interview_id)
+        assert client.post(f"/api/v1/interviews/{interview_id}/segments", json={
+            "speaker_role": "interviewer", "start_ms": 0, "end_ms": 100,
+            "text": "请讲一个你主动承担责任并推动项目落地的经历。", "is_final": True,
+        }).status_code == 201
         answer = "项目出了偏差后，我先把可控环节列出来，重新排了顺序，并每天公开进展，最后把延期缩短了两周。"
         assert not any(keyword in answer for keyword in ["负责", "责任", "主动", "推动", "结果", "复盘"])
         with client.websocket_connect(f"/ws/interviews/{interview_id}/live") as socket:
@@ -1127,7 +1135,7 @@ def test_live_semantic_analysis_uses_company_behavior_rubric_without_keyword_dep
                 "payload": {
                     "speaker_role": "candidate",
                     "speaker_confidence": 1,
-                    "start_ms": 0,
+                    "start_ms": 101,
                     "end_ms": 8000,
                     "text": answer,
                     "is_final": True,
@@ -1599,7 +1607,9 @@ def test_ad_hoc_questions_accumulate_without_forcing_conversation_backwards(tmp_
         old_prompt = next(item for item in next_live["suggestion_history"] if item["id"] == first_prompt["id"])
         assert old_prompt["status"] == "addressed"
         assert not any(item.get("question_id") == first_state["question_id"] for item in next_live["suggestions"])
-        assert any(item["status"] == "active" for item in next_live["suggestion_history"])
+        # Naming the shift directly answers which shift is hard; brevity alone
+        # must not create another follow-up or resurrect the addressed one.
+        assert not next_live["current_suggestion_ids"]
 
 
 def test_consecutive_interviewer_asr_fragments_form_one_logical_question(tmp_path):
@@ -1697,7 +1707,7 @@ def test_existing_round_with_null_suggestion_history_is_backfilled(tmp_path):
     assert job_profile == "{}"
 
 
-def test_repeated_shallow_answer_advances_to_a_different_follow_up(tmp_path):
+def test_shallow_answer_fragments_do_not_advance_follow_up_stage(tmp_path):
     with make_client(tmp_path) as client:
         interview_id = bootstrap(client)["active_interview_id"]
         acknowledge_and_start(client, interview_id)
@@ -1738,7 +1748,7 @@ def test_repeated_shallow_answer_advances_to_a_different_follow_up(tmp_path):
         second = next(item for item in second_live["suggestions"] if item.get("question_id") == first["question_id"])
         assert second["question"] != first["question"]
         assert second["evidence_gap"] == first["evidence_gap"]
-        assert second["follow_up_stage"] == 1
+        assert second["follow_up_stage"] == 0
         assert len([item for item in second_live["suggestion_history"] if item.get("question_id") == first["question_id"]]) == 1
 
 
@@ -1854,7 +1864,7 @@ def test_scorecard_still_recommends_when_required_questions_were_missed(tmp_path
         assert ai["interview_completeness_score"] < 5
         assert ai["overall_score"] is not None
         assert "不能作为候选人的负面证据" in ai["process_warning"]
-        assert response_quality["score"] is not None
+        assert response_quality["score"] is None  # Offline rules cannot grade semantic relevance.
         assert answer.json()["id"] in response_quality["evidence_segment_ids"]
         assert "不推断智力" in response_quality["boundary"]
         assert "不能仅凭语音" in answer_logic["boundary"]
@@ -3057,7 +3067,9 @@ def test_audio_bridge_builds_a_real_pipecat_input_frame():
     assert frame.num_frames == len(pcm) // 2
 
 
-def test_demo_uses_business_hr_ceo_order_and_routes_today_agenda(tmp_path):
+def test_demo_uses_business_hr_ceo_order_and_routes_today_agenda(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr("app.main.utc_now", lambda: now)
     with make_client(tmp_path) as client:
         data = bootstrap(client)
         assert [item["round_type"] for item in data["rounds"]] == ["business", "hr", "ceo"]
@@ -3482,7 +3494,7 @@ def test_conversation_mode_follows_real_questions_without_competency_scores(tmp_
         assert scorecard["rubric_version"] == "conversation-review-v1.0"
         assert scorecard["ai_scores"] == []
         assert scorecard["recommendation"]["interview_mode"] == "conversation"
-        assert scorecard["recommendation"]["ai_recommendation"]["overall_score"] is not None
+        assert scorecard["recommendation"]["ai_recommendation"]["overall_score"] is None  # Offline dialogue scoring stays unknown.
         assert scorecard["recommendation"]["ai_recommendation"]["decision"] in {
             "advance", "supplementary_interview", "hold", "insufficient_evidence"
         }
@@ -3539,7 +3551,7 @@ def test_semantic_live_analysis_preserves_raw_asr_and_saves_high_confidence_corr
         assert corrected["text_corrected"] == "我在九州通负责区域财务管理。"
 
 
-def test_follow_up_history_keeps_source_question_and_only_three_active(tmp_path):
+def test_follow_up_history_keeps_latest_current_and_preserves_backlog(tmp_path):
     with make_client(tmp_path) as client:
         interview_id = bootstrap(client)["active_interview_id"]
         acknowledge_and_start(client, interview_id)
@@ -3554,8 +3566,10 @@ def test_follow_up_history_keeps_source_question_and_only_three_active(tmp_path)
                 json={"speaker_role": "candidate", "start_ms": index * 3000 + 1001, "end_ms": index * 3000 + 2000, "text": "我就简单处理了一下。", "is_final": True},
             )
         live = client.get(f"/api/v1/interviews/{interview_id}/live-state").json()
-        assert len([item for item in live["suggestion_history"] if item["status"] == "active"]) <= 3
-        assert any(item["status"] == "deferred" for item in live["suggestion_history"])
+        assert len([item for item in live["suggestion_history"] if item["status"] == "active"]) == 4
+        assert len(live["current_suggestion_ids"]) == 1
+        newest = next(item for item in live["suggestion_history"] if item["id"] in live["current_suggestion_ids"])
+        assert "第4个" in newest["source_question_text"]
         current = next(item for item in live["suggestion_history"] if item["status"] == "active" and item.get("source_question_text"))
         assert "实际场景" in current["source_question_text"]
 

@@ -58,6 +58,7 @@ class MockIntelligenceProvider:
             [] if conversation_mode else (interview.plan_payload or {}).get("questions", []),
             segments,
             question_progress,
+            (interview.plan_payload or {}).get("turn_intents"),
         )
         evidence = db.scalars(
             select(EvidenceItem).where(EvidenceItem.interview_round_id == interview.id)
@@ -72,7 +73,7 @@ class MockIntelligenceProvider:
             ):
                 evidence_by_competency[item.competency_id].append(item)
 
-        if latest_segment and latest_segment.speaker_role == "candidate":
+        if latest_segment and latest_segment.speaker_role == "candidate" and question_analysis["active_question_id"]:
             self._extract_draft_evidence(db, interview, latest_segment, competencies, evidence)
             db.flush()
             evidence = db.scalars(
@@ -123,6 +124,7 @@ class MockIntelligenceProvider:
             "question_coverage": question_analysis["states"],
             "question_coverage_summary": question_analysis["summary"],
             "active_question_id": question_analysis["active_question_id"],
+            "interviewer_turns": question_analysis["interviewer_turns"],
             "suggestions": suggestions,
             "evidence": [self._evidence_payload(item) for item in evidence[-10:]],
             "transcript_segment_count": len(segments),
@@ -199,31 +201,8 @@ class MockIntelligenceProvider:
             shallow_states = [item for item in question_analysis["states"] if item["status"] == "shallow"]
             answered_states = [item for item in question_analysis["states"] if item["status"] != "unanswered"]
             evidenced_states = [item for item in answered_states if item["status"] == "evidenced"]
-            evidence_ratio = len(evidenced_states) / max(1, len(answered_states))
-            local_score = (
-                round(
-                    min(
-                        5.0,
-                        max(
-                            1.0,
-                            float(response_quality.get("score") or 1) * 0.65
-                            + (1 + 4 * evidence_ratio) * 0.35,
-                        ),
-                    ),
-                    1,
-                )
-                if candidate_segments
-                else None
-            )
-            sufficient = len(candidate_segments) >= 3 and bool(answered_states)
-            if not sufficient:
-                ai_decision, ai_label = "insufficient_evidence", "证据不足，暂不建议推进或淘汰"
-            elif local_score is not None and local_score >= 3.6:
-                ai_decision, ai_label = "advance", "建议进入下一轮，继续核实关键事实"
-            elif local_score is not None and local_score >= 2.7:
-                ai_decision, ai_label = "supplementary_interview", "建议补充验证后再决定"
-            else:
-                ai_decision, ai_label = "hold", "建议保留讨论，并补充关键证据"
+            local_score = None
+            ai_decision, ai_label = "insufficient_evidence", "证据不足，暂不形成方向判断"
             observations = []
             if candidate_segments:
                 observations.append(
@@ -435,8 +414,7 @@ class MockIntelligenceProvider:
             })
 
         assessed = len(competencies) - len(missing)
-        unresolved_jd = sum(item["status"] != "evidenced" for item in jd_assessments)
-        enough = assessed >= max(2, len(competencies) // 2 + len(competencies) % 2) and unresolved_jd == 0
+        enough = assessed >= max(2, len(competencies) // 2 + len(competencies) % 2)
         evidenced_count = sum(item["status"] == "evidenced" for item in tracked_states)
         shallow_count = sum(item["status"] == "shallow" for item in tracked_states)
         unanswered_count = sum(item["status"] == "unanswered" for item in tracked_states)
@@ -458,22 +436,9 @@ class MockIntelligenceProvider:
             else None
         )
         confirmed_score_count = sum(bool(item.get("confirmed_evidence_ids")) for item in scored)
-        if not enough or overall_score is None:
-            ai_decision = "supplementary_interview"
-            ai_label = "补充证据后再判断"
-            rationale = "当前问题覆盖或岗位证据仍不完整，不能把未回答直接当作不符合。"
-        elif overall_score >= 3.5:
-            ai_decision = "advance"
-            ai_label = "建议进入下一轮"
-            rationale = "已覆盖能力项的证据评分达到进入下一轮的参考线，仍需人工核对证据语境。"
-        elif overall_score < 2.5 and confirmed_score_count:
-            ai_decision = "reject"
-            ai_label = "暂不建议进入下一轮"
-            rationale = "已确认的岗位相关证据整体偏弱；该建议不能自动改变候选人阶段。"
-        else:
-            ai_decision = "hold"
-            ai_label = "保留讨论"
-            rationale = "现有证据强弱并存，建议结合岗位硬要求与下一轮补充问题讨论。"
+        ai_decision = "supplementary_interview" if scored else "insufficient_evidence"
+        ai_label = "补充验证后再判断" if scored else "证据不足，暂不形成方向判断"
+        rationale = "本地证据参考不替代完整语义评价；未问到的内容保持未知，不按题目完成度或平均分决定方向。"
         ai_recommendation = {
             "decision": ai_decision,
             "label": ai_label,

@@ -1917,18 +1917,22 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
     ) -> dict[str, Any]:
         _require_role(request, "hr", "admin")
         interview = _interview_or_404(db, interview_id)
-        if interview.status in {"in_progress", "completed", "cancelled"}:
+        if interview.started_at is not None or interview.status in {"in_progress", "completed", "cancelled"}:
             raise HTTPException(409, f"cannot edit interview from status {interview.status}")
         if payload.scheduled_at is not None:
             interview.scheduled_at = payload.scheduled_at
         if payload.meeting_source is not None:
             interview.meeting_source = payload.meeting_source
         if payload.interview_mode is not None and payload.interview_mode != interview.interview_mode:
+            revision = int((interview.plan_payload or {}).get("mode_revision", 0)) + 1
             interview.interview_mode = payload.interview_mode
             _, _, _, job = _context_or_404(db, interview.id)
             interview.plan_payload = _build_interview_plan(
                 db, request.app.state.intelligence, interview, job
             )
+            interview.plan_version = interview.plan_payload["version"]
+            interview.plan_payload = {**interview.plan_payload, "mode_revision": revision,
+                "version": f"{interview.plan_version.split('-mode-')[0]}-mode-{revision}"}
             interview.plan_version = interview.plan_payload["version"]
         if payload.interviewer_open_ids is not None:
             interview.interviewer_names = payload.interviewer_names or []
@@ -2036,7 +2040,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         latest_prior_context = prior_round_context(db, interview)
         if (
             not interview.plan_payload
-            or interview.plan_payload.get("version") != "plan-v1.1"
+            or str(interview.plan_payload.get("version", "")).split("-mode-")[0] != "plan-v1.1"
             or interview.plan_payload.get("interview_mode") != interview.interview_mode
             or interview.plan_payload.get("round_type") != interview.round_type
             or interview.plan_payload.get("question_bank_version") != expected_bank
@@ -2952,6 +2956,8 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         asr_reconnects = 0
         normal_stop = False
         semantic_tasks: set[asyncio.Task] = set()
+        semantic_lock = asyncio.Lock()
+        semantic_epoch = 0
         async_semantic_provider = hasattr(app.state.intelligence, "_chat_json")
 
         async def send_event(payload: dict[str, Any]) -> None:
@@ -3030,6 +3036,10 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             if not async_semantic_provider:
                 return
 
+            nonlocal semantic_epoch
+            semantic_epoch += 1
+            request_epoch = semantic_epoch
+
             def enrich_semantic_analysis() -> dict[str, Any] | None:
                 with database.session_factory() as db:
                     interview = db.get(InterviewRound, interview_id)
@@ -3040,12 +3050,20 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                     result = _analyze_live_with_history(
                         db, app.state.intelligence, interview, job, segment
                     )
+                    if request_epoch != semantic_epoch:
+                        db.rollback()
+                        return None
                     db.commit()
                     return result
 
             async def run_semantic_enrichment() -> None:
                 try:
-                    semantic_analysis = await asyncio.to_thread(enrich_semantic_analysis)
+                    # Coalesce ASR fragments without expiring any visible card.
+                    await asyncio.sleep(0.8)
+                    async with semantic_lock:
+                        if request_epoch != semantic_epoch:
+                            return
+                        semantic_analysis = await asyncio.to_thread(enrich_semantic_analysis)
                     if semantic_analysis is not None and _analysis_update_is_meaningful(
                         analysis, semantic_analysis
                     ):
@@ -3927,7 +3945,11 @@ def _build_interview_plan(
 ) -> dict[str, Any]:
     plan = build_plan(db, interview, job.competencies)
     refine = getattr(intelligence, "refine_interview_plan", None)
-    return refine(db, interview, job, plan) if callable(refine) else plan
+    plan = refine(db, interview, job, plan) if callable(refine) else plan
+    revision = (interview.plan_payload or {}).get("mode_revision")
+    if revision:
+        plan = {**plan, "mode_revision": revision, "version": f"{plan['version']}-mode-{revision}"}
+    return plan
 
 
 def _refresh_planned_job_interviews(

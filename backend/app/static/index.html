@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.1.0-job-lifecycle" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.2.0-hybrid-guidance" />
   </head>
   <body>
     <header class="topbar">
@@ -140,9 +140,9 @@
             <div class="schedule-section">
               <div class="schedule-heading"><div><span class="kicker">03 · INTERVIEW LOOP</span><h3>岗位面试流程</h3></div><span id="task-flow-summary" class="helper">选择需要的轮次，并按实际顺序排列</span></div>
               <div class="schedule-grid">
-                <article class="schedule-card" data-round-form="business"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用业务面</span></label><span class="round-no">1</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="business_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="business_interviewer" required></select></label><label>时间<input name="business_time" type="datetime-local" required /></label><label>场景<select name="business_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
-                <article class="schedule-card" data-round-form="hr"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 HR 面</span></label><span class="round-no">2</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="hr_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="hr_interviewer" required></select></label><label>时间<input name="hr_time" type="datetime-local" required /></label><label>场景<select name="hr_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
-                <article class="schedule-card" data-round-form="ceo"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 CEO 面</span></label><span class="round-no">3</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><label>面试方式<select name="ceo_mode"><option value="structured">固定问题 + 证据评分</option><option value="conversation">自由对话分析</option></select></label><label>面试官<select name="ceo_interviewer" required></select></label><label>时间<input name="ceo_time" type="datetime-local" required /></label><label>场景<select name="ceo_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+                <article class="schedule-card" data-round-form="business"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用业务面</span></label><span class="round-no">1</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><div class="hybrid-mode-note"><strong>智能混合面试</strong><small>系统准备核心问题，支持自由提问；AI 跟随真实对话整理证据。</small></div><label>面试官<select name="business_interviewer" required></select></label><label>时间<input name="business_time" type="datetime-local" required /></label><label>场景<select name="business_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+                <article class="schedule-card" data-round-form="hr"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 HR 面</span></label><span class="round-no">2</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><div class="hybrid-mode-note"><strong>智能混合面试</strong><small>系统准备核心问题，支持自由提问；AI 跟随真实对话整理证据。</small></div><label>面试官<select name="hr_interviewer" required></select></label><label>时间<input name="hr_time" type="datetime-local" required /></label><label>场景<select name="hr_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
+                <article class="schedule-card" data-round-form="ceo"><div class="schedule-card-head"><label class="round-toggle"><input type="checkbox" data-round-enabled checked /><span>启用 CEO 面</span></label><span class="round-no">3</span></div><div class="round-order-actions"><button type="button" data-round-move="up">前移</button><button type="button" data-round-move="down">后移</button></div><div class="hybrid-mode-note"><strong>智能混合面试</strong><small>系统准备核心问题，支持自由提问；AI 跟随真实对话整理证据。</small></div><label>面试官<select name="ceo_interviewer" required></select></label><label>时间<input name="ceo_time" type="datetime-local" required /></label><label>场景<select name="ceo_source"><option value="offline">线下面试</option><option value="feishu">飞书会议</option></select></label></article>
               </div>
             </div>
             <div class="task-submit"><span class="helper">本次设置会记为该岗位默认流程；后续轮次会读取此前已确认事实和待验证问题。</span><button id="task-submit-btn" class="primary" type="submit">创建并进入首轮面试</button></div>
@@ -521,12 +521,13 @@
         <div class="console-grid">
           <aside id="question-panel" class="panel plan-panel">
             <div class="panel-heading">
-              <div><span class="kicker">STANDARD + OPTIONAL</span><h3>建议提问</h3></div>
+              <div><span class="kicker">CORE QUESTIONS</span><h3>核心问题参考</h3></div>
               <span class="count" id="question-count">0</span>
             </div>
             <div class="required-summary">
-              <strong>本轮统一必问题</strong>
-              <span id="required-progress">0 / 0 已完成</span>
+              <strong>核心问题参考</strong>
+              <span id="required-progress">尚未验证</span>
+              <small>可以直接提问、改写、跳过或自由追问。AI 跟随真实对话判断相关证据。</small>
               <small id="question-mix" class="question-mix">正在整理本轮题目结构…</small>
               <div class="bar"><i id="required-progress-bar" style="width:0%"></i></div>
             </div>
@@ -575,9 +576,21 @@
           </section>
 
           <aside class="analysis-column">
+            <section class="panel suggestion-panel">
+              <div class="panel-heading">
+                <div><span class="kicker">NEXT BEST QUESTION</span><h3>追问建议</h3></div><span id="suggestion-history-count" class="count">0</span>
+              </div>
+              <div id="urgent-followup" class="urgent-followup hidden" aria-live="polite">
+                <strong>当前建议</strong><small id="urgent-followup-source"></small><p id="urgent-followup-question"></p><small id="urgent-followup-reason"></small><blockquote id="urgent-followup-basis"></blockquote><div id="urgent-followup-actions"></div>
+              </div>
+              <div id="suggestion-list" class="suggestion-list">
+                <p class="muted">开始后根据证据缺口生成。</p>
+              </div>
+            </section>
+
             <section id="analysis-panel" class="panel analysis-panel">
               <div class="panel-heading">
-                <div><span class="kicker">COVERAGE</span><h3>能力覆盖</h3></div>
+                <div><span class="kicker">COVERAGE</span><h3>核心内容覆盖</h3></div>
                 <span id="coverage-ratio" class="count">0/0</span>
               </div>
               <div id="coverage-list" class="coverage-list"></div>
@@ -586,18 +599,6 @@
                 <span id="question-coverage-ratio" class="count">0/0</span>
               </div>
               <div id="question-coverage-list" class="question-coverage-list"></div>
-            </section>
-
-            <section class="panel suggestion-panel">
-              <div class="panel-heading">
-                <div><span class="kicker">NEXT BEST QUESTION</span><h3>追问建议</h3></div><span id="suggestion-history-count" class="count">0</span>
-              </div>
-              <div id="urgent-followup" class="urgent-followup hidden" role="alert" aria-live="assertive">
-                <strong>回答较浅，建议现在追问</strong><small id="urgent-followup-source"></small><p id="urgent-followup-question"></p><small id="urgent-followup-reason"></small>
-              </div>
-              <div id="suggestion-list" class="suggestion-list">
-                <p class="muted">开始后根据证据缺口生成。</p>
-              </div>
             </section>
 
             <section class="panel evidence-panel">
@@ -620,8 +621,8 @@
           <div id="recommendation" class="recommendation"></div>
           <section id="answer-logic-section" class="answer-logic-section hidden">
             <div class="evaluation-heading">
-              <div><span class="kicker">ANSWER LOGIC</span><h3>回答逻辑与一致性核验</h3></div>
-              <small>检查矛盾与待核实说法，不做测谎</small>
+              <div><span class="kicker">ANSWER LOGIC</span><h3>问题理解与回答质量</h3></div>
+              <small>仅评价本轮回答表现，不推断智力、人格或长期潜力。</small>
             </div>
             <div id="answer-logic-review"></div>
           </section>
@@ -686,6 +687,6 @@
       </div>
     </dialog>
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=1.1.0-job-lifecycle" defer></script>
+    <script src="/static/app.js?v=1.2.0-hybrid-guidance" defer></script>
   </body>
 </html>

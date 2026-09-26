@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from ..models import TranscriptSegment
 from .utterance_quality import best_substantive_quote, is_evidence_worthy_utterance
 
 
 ANSWER_LOGIC_BOUNDARY = (
+    "仅评价本轮回答表现，不推断智力、人格或长期潜力。"
     "本模块只检查回答文本中的因果、时间线、责任边界和跨轮表述一致性；"
     "不能仅凭语音、停顿、表情或措辞判断候选人是否撒谎。异常项只用于提出核验问题，"
     "不得直接作为录用或淘汰依据。"
 )
+
+
+def is_clarification_response(text: str) -> bool:
+    return bool(re.search(r"(?:您|你).{0,12}(?:说|指)|是指.{1,30}还是|我理解.{0,20}对吗|先确认.{1,30}(?:范围|边界|意思)", text))
 
 
 def build_local_answer_logic_review(
@@ -23,25 +29,23 @@ def build_local_answer_logic_review(
         if item.speaker_role == "candidate"
         and is_evidence_worthy_utterance(item.effective_text)
     ]
-    if len(candidate_segments) < 2:
+    from .question_analysis import assess_response_quality
+    paired = assess_response_quality(segments)
+    if not paired["question_answer_pairs"]:
         return {
             "status": "insufficient_evidence",
             "sufficient_evidence": False,
             "logic_score": None,
             "confidence": 0.0,
             "label": "有效回答不足，暂不能分析",
-            "summary": "至少需要两段有效候选人回答，才能检查前后逻辑和表述一致性。",
+            "summary": "需要真实面试问题与对应回答；没有问到的内容保持未验证。",
             "dimensions": [],
             "consistency_flags": [],
             "verification_questions": [],
             "evidence_segment_ids": [],
             "boundary": ANSWER_LOGIC_BOUNDARY,
         }
-    strongest = sorted(
-        candidate_segments,
-        key=lambda item: len(item.effective_text),
-        reverse=True,
-    )[:4]
+    strongest = candidate_segments[-4:]
     return {
         "status": "semantic_review_pending",
         "sufficient_evidence": True,
@@ -63,6 +67,7 @@ def build_local_answer_logic_review(
         "verification_questions": [],
         "evidence_segment_ids": [item.id for item in strongest],
         "boundary": ANSWER_LOGIC_BOUNDARY,
+        "question_answer_pairs": paired["question_answer_pairs"],
     }
 
 
@@ -78,6 +83,8 @@ def quotes_for_segments(
         if not segment:
             continue
         quote = best_substantive_quote(segment.effective_text, max_chars=max_chars)
+        if not quote and is_clarification_response(segment.effective_text):
+            quote = segment.effective_text[:max_chars]
         if quote:
             output.append({"segment_id": segment_id, "quote": quote})
     return output

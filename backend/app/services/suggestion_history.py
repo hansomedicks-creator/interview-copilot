@@ -9,16 +9,31 @@ from ..models import InterviewRound, new_id, utc_now
 def merge_suggestion_history(
     interview: InterviewRound, analysis: dict[str, Any]
 ) -> dict[str, Any]:
-    """Keep useful prompts stable without forcing the conversation backwards."""
+    """Keep useful prompts stable and prefer the latest logical question."""
     history = [dict(item) for item in (interview.suggestion_history or [])]
     by_key = {str(item.get("dedupe_key")): item for item in history}
     now = utc_now().isoformat()
     current_ids: list[str] = []
+    active_question = analysis.get("active_question_id")
+    for item in history:
+        if item.get("status") == "active" and item["id"] in analysis.get("resolved_suggestion_ids", []):
+            item.update(status="resolved", resolved_at=now, is_current=False)
+        if item.get("question_id") != active_question:
+            item["is_current"] = False
     for suggestion in list(analysis.get("suggestions", []))[:6]:
         key = _dedupe_key(suggestion)
         existing = by_key.get(key)
         if existing:
-            existing["last_seen_at"] = now
+            if existing.get("status") in {"addressed", "skipped", "resolved"}:
+                continue
+            if existing.get("source") == "llm_semantic_evidence_gap" and suggestion.get("source") != "llm_semantic_evidence_gap":
+                # Fast ASR updates must not overwrite a semantic card with a
+                # local template while the next semantic response is pending.
+                current_ids.append(existing["id"])
+                continue
+            substantive_update = any(existing.get(field) != suggestion.get(field) for field in (
+                "basis_quote", "evidence_segment_ids", "evidence_gap", "follow_up_purpose"
+            ))
             existing["occurrence_count"] = int(existing.get("occurrence_count", 1)) + 1
             if existing.get("status") == "deferred":
                 existing["status"] = "active"
@@ -27,7 +42,8 @@ def merge_suggestion_history(
                 suggestion.get("source") == "llm_semantic_evidence_gap"
                 and existing.get("source") != "llm_semantic_evidence_gap"
             )
-            if semantic_promotion:
+            if semantic_promotion or substantive_update:
+                existing["last_seen_at"] = now
                 # The fast local pass may have created an older card in legacy
                 # sessions. A validated semantic suggestion must replace that
                 # template instead of inheriting its frozen wording.
@@ -39,12 +55,12 @@ def merge_suggestion_history(
                     "evidence_segment_ids",
                     "source_question_text",
                     "priority",
+                    "evidence_gap",
+                    "follow_up_purpose",
                 ):
                     if field in suggestion:
                         existing[field] = suggestion[field]
-            # Once shown, keep the wording and source question stable. Model
-            # refreshes may phrase the same gap differently; replacing the card
-            # every few seconds makes it impossible for an interviewer to read.
+            # Mere paraphrasing stays stable; new evidence may update the card.
             # Priority is only allowed to move upward.
             priority_rank = {"low": 0, "normal": 1, "high": 2}
             if priority_rank.get(str(suggestion.get("priority")), 1) > priority_rank.get(
@@ -65,21 +81,22 @@ def merge_suggestion_history(
         history.append(item)
         by_key[key] = item
         current_ids.append(item["id"])
-    active_items = [item for item in history if item.get("status") == "active"]
+    active_items = [item for item in reversed(history) if item.get("status") == "active"]
     active_items.sort(
         key=lambda item: (
-            0 if item.get("id") in current_ids else 1,
-            0 if item.get("priority") == "high" else 1,
+            bool(active_question and item.get("question_id") == active_question),
+            str(item.get("last_seen_at") or ""),
             str(item.get("created_at") or ""),
-        )
+        ), reverse=True,
     )
-    for item in active_items[3:]:
-        item["status"] = "deferred"
-        item["resolved_at"] = now
-    history = history[-30:]
+    current = next((item for item in active_items if active_question and item.get("question_id") == active_question), None)
+    for item in history:
+        item["is_current"] = item is current
     interview.suggestion_history = history
-    analysis["suggestion_history"] = list(reversed(history))
-    analysis["current_suggestion_ids"] = current_ids
+    analysis["suggestion_history"] = sorted(reversed(history), key=lambda item: (
+        str(item.get("last_seen_at") or ""), str(item.get("created_at") or "")
+    ), reverse=True)
+    analysis["current_suggestion_ids"] = [current["id"]] if current else []
     return analysis
 
 
@@ -91,6 +108,7 @@ def update_suggestion_status(
     for item in history:
         if item.get("id") == suggestion_id:
             item["status"] = status
+            item["is_current"] = False
             item["resolved_at"] = utc_now().isoformat() if status != "active" else None
             selected = item
             break

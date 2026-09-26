@@ -20,7 +20,7 @@ REFLECTION_MARKERS = ("复盘", "原因", "改进", "后来", "调整", "修正"
 CAUSAL_MARKERS = ("因为", "所以", "原因", "导致", "为了", "考虑到", "判断", "取舍", "优先", "相比")
 STRUCTURE_MARKERS = ("首先", "然后", "接着", "最后", "第一", "第二", "一方面", "另一方面")
 OWNERSHIP_MARKERS = ("我负责", "我做", "我写", "我改", "我排查", "我设计", "我决定", "我亲自", "由我")
-MECHANISM_MARKERS = ("先", "再", "步骤", "流程", "排查", "检查", "日志", "接口", "配置", "调用", "实现", "原理")
+MECHANISM_MARKERS = ("步骤", "流程", "排查", "检查", "日志", "接口", "配置", "调用", "实现", "原理")
 DECISION_MARKERS = ("依据", "判断", "选择", "决定", "权衡", "取舍", "优先", "考虑", "因为", "所以")
 DELIVERY_QUESTION_MARKERS = ("结果", "成果", "完成", "达成", "上线", "交付", "产出", "效果", "是否有效")
 METRIC_QUESTION_MARKERS = ("指标", "数据", "多少", "量化", "提升", "降低", "增长", "转化率", "效率", "成本", "周期", "KPI")
@@ -31,11 +31,54 @@ GENERIC_TERMS = {
     "岗位", "经历", "具体", "一次", "什么", "如何", "说明", "请讲", "这个", "你的", "你会", "当时",
 }
 
+TURN_TYPES = {"interview_question", "small_talk", "transition", "confirmation", "instruction", "candidate_question_response", "administrative"}
+
+
+def interviewer_turns(segments: list[TranscriptSegment], overrides: dict | None = None) -> list[dict]:
+    """Classify logical turns, preserving fragments and an auditable rationale."""
+    turns: list[dict] = []
+    previous_role = None
+    for segment in segments:
+        if segment.speaker_role == "interviewer":
+            if previous_role != "interviewer":
+                turns.append({"segment_ids": [], "text": "", "previous_candidate_text": previous_text if previous_role == "candidate" else ""})
+            turns[-1]["segment_ids"].append(segment.id)
+            turns[-1]["text"] += (" " if turns[-1]["text"] else "") + segment.effective_text
+        previous_role = segment.speaker_role
+        previous_text = segment.effective_text
+    for turn in turns:
+        text = turn["text"]
+        supplied = (overrides or {}).get(turn["segment_ids"][0], {})
+        if supplied.get("text") == text and supplied.get("turn_type") in TURN_TYPES and supplied.get("confidence", 0) >= .7:
+            turn.update({key: supplied[key] for key in ("turn_type", "confidence", "reason")})
+            turn["source"] = "semantic"
+            continue
+        # Conservative offline fallback: a question mark alone is not evidence
+        # that this turn requests job-related behavior or reasoning.
+        kind = "transition"
+        asks = re.search(r"为什么|怎么|如何|什么|哪|能否|是否|请讲|讲讲|介绍.*经历|说说|负责", text)
+        work = re.search(r"岗位|项目|工作|方案|工具|技术|团队|客户|负责|判断|选择|离开|离职|学校|课程|学习|实习|经验|经历|困难|问题|故障|设计|系统|业务|决定|使用|实现|部署|例子|处理|动机|职业", text)
+        if asks and work:
+            kind = "interview_question"
+        elif re.search(r"到岗|入职时间|薪资|薪酬|面试时间|预约|排期", text):
+            kind = "administrative"
+        elif re.search(r"自我介绍|慢慢说|简单一点|请坐|喝.*水", text):
+            kind = "instruction"
+        elif re.search(r"天气|挺热|吃饭|过来.*方便|路上|堵车", text):
+            kind = "small_talk"
+        elif re.search(r"对吧|是吗|没错吧|毕业|现在.*在", text):
+            kind = "confirmation"
+        elif re.search(r"贵公司|你们.*[吗？?]|想问|请问", turn["previous_candidate_text"]):
+            kind = "candidate_question_response"
+        turn.update(turn_type=kind, confidence=.6, source="local_conservative", reason="结合提问动作与岗位经历语境判断；不明确的发言暂不触发追问")
+    return turns
+
 
 def analyze_question_answers(
     questions: list[dict[str, Any]],
     segments: list[TranscriptSegment],
     progress: list[InterviewQuestionProgress],
+    turn_intents: dict | None = None,
 ) -> dict[str, Any]:
     """Link candidate answers to planned questions without turning inference into a human fact."""
     question_by_id = {item.get("id"): item for item in questions if item.get("id")}
@@ -44,6 +87,9 @@ def analyze_question_answers(
     active_question_id: str | None = None
     active_source = "none"
     last_speaker_role: str | None = None
+    turns = interviewer_turns(segments, turn_intents)
+    intent_by_segment = {sid: turn for turn in turns for sid in turn["segment_ids"]}
+    ignore_response = False
 
     manual_progress = sorted(
         [item for item in progress if item.asked],
@@ -57,6 +103,14 @@ def analyze_question_answers(
 
     for segment in segments:
         if segment.speaker_role == "interviewer":
+            intent = intent_by_segment[segment.id]
+            if intent["turn_type"] != "interview_question":
+                active_question_id = None
+                active_source = "none"
+                ignore_response = True
+                last_speaker_role = "interviewer"
+                continue
+            ignore_response = False
             matched = _best_question_match(segment.effective_text, question_by_id, terms_by_id, interviewer=True)
             if matched:
                 active_question_id = matched
@@ -99,6 +153,9 @@ def analyze_question_answers(
             last_speaker_role = "interviewer"
             continue
         if segment.speaker_role != "candidate":
+            continue
+        if ignore_response:
+            last_speaker_role = "candidate"
             continue
 
         question_id = active_question_id
@@ -158,6 +215,7 @@ def analyze_question_answers(
                 "answer_character_count": len(re.sub(r"\s+", "", text)),
                 "evidence_segment_ids": [item.id for item in answer_segments],
                 "answer_excerpt": text[:120],
+                "answer_text": text,
                 "basis_segment_id": answer_segments[-1].id if answer_segments else None,
                 "basis_quote": _answer_anchor(answer_segments),
                 "missing_dimensions": _missing_dimensions(question, signals) if answer_segments else [],
@@ -169,6 +227,7 @@ def analyze_question_answers(
         "states": states,
         "suggestions": suggestions,
         "active_question_id": active_question_id,
+        "interviewer_turns": turns,
         "summary": {
             "total": len(states),
             "unanswered": sum(item["status"] == "unanswered" for item in states),
@@ -181,6 +240,8 @@ def analyze_question_answers(
 def _latest_manual_question(
     progress: list[InterviewQuestionProgress], segment: TranscriptSegment
 ) -> InterviewQuestionProgress | None:
+    if not progress or segment.created_at is None:
+        return None
     segment_time = segment.created_at.timestamp()
     eligible = [item for item in progress if item.asked_at.timestamp() <= segment_time]
     return eligible[-1] if eligible else None
@@ -266,67 +327,21 @@ def _answer_signals(text: str) -> dict[str, bool]:
 
 
 def assess_response_quality(segments: list[TranscriptSegment]) -> dict[str, Any]:
-    """Score observable answer structure, never innate intelligence or personality."""
-    candidate_segments = [
-        item for item in segments
-        if item.speaker_role == "candidate" and is_evidence_worthy_utterance(item.effective_text)
-    ]
-    if not candidate_segments:
-        return {
-            "score": None,
-            "label": "没有可评估的候选人回答",
-            "confidence": 0.0,
-            "evidence_segment_ids": [],
-            "evidence_quotes": [],
-            "dimensions": {},
-            "rationale": "本轮没有已确认属于候选人的有效回答，不能形成回答质量分。",
-            "boundary": "只评估本轮回答呈现出的结构与证据，不推断智力、人格或潜力。",
-        }
-
-    texts = [item.effective_text.strip() for item in candidate_segments]
-    combined = " ".join(texts)
-    signals = _answer_signals(combined)
-    average_length = sum(len(re.sub(r"\s+", "", text)) for text in texts) / len(texts)
-    dimensions = {
-        "事实与操作细节": bool(signals["action"] or signals["mechanism"]),
-        "判断依据": bool(signals["causal"] or signals["decision_basis"]),
-        "责任边界": bool(signals["ownership"]),
-        "边界与修正": bool(signals["reflection"] or signals["constraint"]),
-        "表达清晰度": bool(signals["structure"] or len(candidate_segments) >= 2),
-    }
-    score = 1.0
-    score += 0.5 if average_length >= 18 else 0
-    score += 0.8 if signals["action"] or signals["mechanism"] else 0
-    score += 0.9 if signals["causal"] or signals["decision_basis"] else 0
-    score += 0.7 if signals["ownership"] else 0
-    score += 0.7 if signals["reflection"] or signals["constraint"] else 0
-    score += 0.4 if signals["structure"] or len(candidate_segments) >= 2 else 0
-    score = round(min(5.0, score), 1)
-    if score < 2:
-        label = "信息较少，暂难判断"
-    elif score < 3:
-        label = "能说明基本事实"
-    elif score < 4:
-        label = "表达较清楚，部分因果可追溯"
-    else:
-        label = "事实、因果与复盘较完整"
-    observed = [name for name, present in dimensions.items() if present]
-    missing = [name for name, present in dimensions.items() if not present]
-    rationale = (
-        f"已观察到{'、'.join(observed) or '基础回答'}；"
-        f"仍缺少{'、'.join(missing) or '明显缺口'}。"
-    )
-    confidence = round(min(0.88, 0.28 + 0.1 * len(candidate_segments) + 0.08 * len(observed)), 2)
-    strongest = sorted(candidate_segments, key=lambda item: len(item.effective_text), reverse=True)[:3]
+    """Keep paired observations available; offline rules must not invent a score."""
+    review = analyze_question_answers([], segments, [])
+    pairs = [item for item in review["states"] if item["evidence_segment_ids"]]
+    ids = list(dict.fromkeys(sid for pair in pairs for sid in pair["evidence_segment_ids"]))
     return {
-        "score": score,
-        "label": label,
-        "confidence": confidence,
-        "evidence_segment_ids": [item.id for item in strongest],
-        "evidence_quotes": [quote for item in strongest if (quote := best_substantive_quote(item.effective_text, max_chars=160))],
-        "dimensions": dimensions,
-        "rationale": rationale,
-        "boundary": "只评估本轮回答呈现出的结构与证据，不推断智力、人格或潜力。",
+        "score": None,
+        "label": "等待问答语义评价" if pairs else "没有可评估的真实问答",
+        "confidence": 0.0,
+        "evidence_segment_ids": ids,
+        "evidence_quotes": [pair["answer_excerpt"] for pair in pairs],
+        "question_answer_pairs": [{"question": pair["question"], "answer": pair["answer_text"],
+                                  "answer_segment_ids": pair["evidence_segment_ids"]} for pair in pairs],
+        "dimensions": {},
+        "rationale": "需要结合面试官实际问题判断回答是否对题；本地规则不按长度或关键词给分。",
+        "boundary": "仅评价本轮回答表现，不推断智力、人格或长期潜力。",
     }
 
 
@@ -334,12 +349,16 @@ def _has_traceable_depth(
     question: dict[str, Any], text: str, signals: dict[str, bool]
 ) -> bool:
     character_count = len(re.sub(r"\s+", "", text))
-    if character_count < 24:
+    if character_count < 4:
+        return False
+    # A bare action placeholder is not a description of what happened. This
+    # does not reject concise, concrete answers (e.g. "我负责接口和部署").
+    if re.fullmatch(r"[我会就先们\s]*(?:跟客户)?(?:处理|解释|沟通|做|弄|协调)(?:了)?(?:一下|一下子|一点)[。！!\s]*", text):
         return False
     required = _required_dimensions(question)
     if required:
         present = sum(signals.get(signal_key, False) for _, signal_key in required)
-        return present >= max(1, len(required) - 1)
+        return present == len(required)
     observable = sum(
         signals.get(key, False)
         for key in ("action", "ownership", "mechanism", "decision_basis", "constraint", "reflection", "causal")
@@ -353,7 +372,7 @@ def _missing_dimensions(question: dict[str, Any], signals: dict[str, bool]) -> l
 
 def _required_dimensions(question: dict[str, Any]) -> list[tuple[str, str]]:
     """Select only the evidence that the actual question makes decision-relevant."""
-    text = f"{question.get('question', '')}{question.get('follow_up', '')}"
+    text = str(question.get("question", ""))
     # A resume quote may itself mention growth, delivery or metrics. That does
     # not mean the interviewer is currently asking the candidate to prove them.
     text = re.sub(r"“[^”]{0,600}”", "", text)
@@ -402,12 +421,15 @@ def _question_gap_suggestions(states: list[dict[str, Any]], active_question_id: 
     )
     if not item:
         return []
+    if re.search(r"(?:…|\.\.\.|然后|首先|接着|因为|所以|还有|先看了日志)[。\s]*$", item.get("answer_text", "")):
+        return []
 
     missing = item["missing_dimensions"]
     reason = f"“{item['competency_name']}”的这段回答较浅"
     if missing:
         reason += f"，尚缺少{'、'.join(missing[:2])}"
-    follow_up_stage = max(0, int(item.get("answer_turn_count", 1)) - 1)
+    # ASR fragment count is not the number of failed attempts to answer.
+    follow_up_stage = 0
     selected_gap = missing[follow_up_stage % len(missing)] if missing else "可核验细节"
     quote = item["basis_quote"]
     follow_ups = {

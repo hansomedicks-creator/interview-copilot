@@ -1937,7 +1937,7 @@ async function createInterviewTask(event) {
           const interviewer = state.assignableUsers.find((user) => user.open_id === value(`${roundType}_interviewer`));
           return {
           round_type: roundType,
-          interview_mode: form.elements[`${roundType}_mode`].value,
+          interview_mode: "structured",
           interviewer_open_ids: [value(`${roundType}_interviewer`)],
           interviewer_names: [interviewer?.display_name || "待确认面试官"],
           scheduled_at: form.elements[`${roundType}_time`].value,
@@ -1979,7 +1979,7 @@ async function loadTodayInterviews() {
       <button class="today-card-main" data-today-interview="${item.interview_id}">
         <span class="today-time">${time}</span>
         <span class="today-person"><strong>${escapeHtml(item.candidate.display_name)}</strong><small>${escapeHtml(item.job.title)}</small></span>
-        <span class="today-round">${roundLabel(item.round_type)} · ${item.interview_mode === "conversation" ? "自由对话" : "结构化"}</span>
+        <span class="today-round">${roundLabel(item.round_type)} · ${item.interview_mode === "conversation" ? "旧版自由对话" : "智能混合面试"}</span>
       </button>
       <button class="today-dossier-btn" data-today-dossier="${item.interview_id}">查看候选人档案<small>${dossierHint}</small></button>
     </article>`;
@@ -2088,9 +2088,9 @@ async function loadAdminTasks() {
         const selected = round.assignments[0]?.open_id || "";
         return `<section class="admin-round" data-admin-round="${round.id}">
           <div class="admin-round-head"><strong>${roundLabel(round.round_type)}</strong><span class="${round.status === "cancelled" ? "status-cancelled" : ""}">${escapeHtml(round.status)}</span></div>
-          <label>面试时间<input data-manage-time type="datetime-local" value="${round.scheduled_at ? String(round.scheduled_at).slice(0,16) : ""}" ${round.status === "cancelled" ? "disabled" : ""} /></label>
+          <label>面试时间<input data-manage-time type="datetime-local" value="${round.scheduled_at ? localDateTimeValue(new Date(round.scheduled_at)) : ""}" ${round.status === "cancelled" ? "disabled" : ""} /></label>
           <label>面试官<select data-manage-user ${round.status === "cancelled" ? "disabled" : ""}>${userOptions(selected)}</select></label>
-          <label>面试方式<select data-manage-mode ${round.status === "cancelled" ? "disabled" : ""}><option value="structured" ${round.interview_mode !== "conversation" ? "selected" : ""}>固定问题 + 证据评分</option><option value="conversation" ${round.interview_mode === "conversation" ? "selected" : ""}>自由对话分析</option></select></label>
+          <div class="hybrid-mode-note">面试辅助方式：${round.interview_mode === "conversation" ? '<label><input type="checkbox" data-upgrade-mode /> 将旧版自由对话升级为智能混合面试</label>' : '智能混合面试'}<input type="hidden" data-manage-mode value="${round.interview_mode || 'structured'}" /></div>
           <label>场景<select data-manage-source ${round.status === "cancelled" ? "disabled" : ""}><option value="offline" ${round.meeting_source === "offline" ? "selected" : ""}>线下面试</option><option value="feishu" ${round.meeting_source === "feishu" ? "selected" : ""}>飞书会议</option></select></label>
           <div class="admin-round-actions"><button class="secondary compact" data-save-round ${round.status === "cancelled" ? "disabled" : ""}>保存调整</button><button class="danger compact" data-cancel-round ${round.status === "cancelled" ? "disabled" : ""}>取消本轮</button></div>
         </section>`;
@@ -2508,18 +2508,23 @@ async function saveManagedRound(event) {
   const container = event.currentTarget.closest("[data-admin-round]");
   const openId = container.querySelector("[data-manage-user]").value;
   const user = state.assignableUsers.find((item) => item.open_id === openId);
-  await api(`/api/v1/admin/interviews/${container.dataset.adminRound}`, {
+  const button = event.currentTarget;
+  const time = container.querySelector("[data-manage-time]").value;
+  button.disabled = true;
+  try {
+    await api(`/api/v1/admin/interviews/${container.dataset.adminRound}`, {
     method: "PATCH",
     body: JSON.stringify({
-      scheduled_at: container.querySelector("[data-manage-time]").value,
-      interviewer_open_ids: [openId],
-      interviewer_names: [user.display_name],
-      interview_mode: container.querySelector("[data-manage-mode]").value,
+      ...(time ? { scheduled_at: new Date(time).toISOString() } : {}),
+      ...(user ? { interviewer_open_ids: [openId], interviewer_names: [user.display_name] } : {}),
+      interview_mode: container.querySelector("[data-upgrade-mode]")?.checked ? "structured" : container.querySelector("[data-manage-mode]").value,
       meeting_source: container.querySelector("[data-manage-source]").value,
     }),
   });
   await loadAdminTasks();
   toast("面试安排与分析方式已更新，面试官的未来 7 天任务会同步变化");
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
 }
 
 async function cancelManagedRound(event) {
@@ -2613,8 +2618,8 @@ function renderPlan(plan = {}) {
   }
   const progress = new Map((state.questionProgress?.items || []).map((item) => [item.question_id, item]));
   const answerState = new Map((state.questionCoverage || []).map((item) => [item.question_id, item]));
-  const sourceLabel = (item) => item.required ? "本轮唯一统一题" : item.source === "resume_jd_match" ? (item.generation_mode === "llm_semantic" ? "AI 深度简历题" : "简历经历 × 岗位重点") : item.source === "resume_personalized" ? "简历核实" : item.source === "prior_round" ? "前轮待验证" : "通用可选";
-  const answerLabel = { unanswered: "未回答", shallow: "回答较浅", evidenced: "已有证据" };
+  const sourceLabel = (item) => item.required ? "核心问题参考" : item.source === "resume_jd_match" ? "简历经历 × 岗位重点" : item.source === "resume_personalized" ? "简历核实" : item.source === "prior_round" ? "前轮待验证" : "通用可选";
+  const answerLabel = { unanswered: "未验证", shallow: "部分涉及", evidenced: "已有充分证据" };
   $("question-count").textContent = questions.length;
   $("question-list").innerHTML = questions.map((item, index) => {
     const answer = answerState.get(item.id);
@@ -2637,14 +2642,14 @@ function renderPlan(plan = {}) {
   document.querySelectorAll("[data-question-id]").forEach((button) => button.addEventListener("click", toggleQuestionAsked));
   const total = state.questionProgress?.required_total || 0;
   const asked = state.questionProgress?.required_asked || 0;
-  $("required-progress").textContent = `${asked} / ${total} 已完成`;
+  $("required-progress").textContent = `${asked} / ${total} 已提及（不影响候选人评分）`;
   const mix = plan.question_mix || {
     required: questions.filter((item) => item.required).length,
     resume_jd_match: questions.filter((item) => item.source === "resume_jd_match").length,
     resume_personalized: questions.filter((item) => item.source === "resume_personalized").length,
     prior_round: questions.filter((item) => item.source === "prior_round").length,
   };
-  const mixLabels = [`${mix.required || 0} 道统一必问`, `${mix.resume_jd_match || 0} 道简历经历题`];
+  const mixLabels = [`${mix.required || 0} 道核心参考`, `${mix.resume_jd_match || 0} 道简历经历题`];
   if (mix.company_standard) mixLabels.push(`${mix.company_standard} 道公司通用`);
   if (mix.resume_personalized) mixLabels.push(`${mix.resume_personalized} 道简历定制`);
   if (mix.prior_round) mixLabels.push(`${mix.prior_round} 道前轮待验证`);
@@ -3073,7 +3078,7 @@ function renderAnalysis(analysis) {
   `).join("");
 
   state.questionCoverage = analysis.question_coverage || [];
-  const answerLabels = { unanswered: "未回答", shallow: "回答较浅", evidenced: "已有证据" };
+  const answerLabels = { unanswered: "未验证", shallow: "部分涉及", evidenced: "已有充分证据" };
   const visibleQuestions = state.questionCoverage.filter((item) => conversationMode || item.required || ["resume_jd_match", "resume_personalized", "prior_round"].includes(item.source));
   const answeredQuestions = visibleQuestions.filter((item) => item.status !== "unanswered").length;
   $("question-coverage-ratio").textContent = `${answeredQuestions}/${visibleQuestions.length}`;
@@ -3091,54 +3096,38 @@ function renderAnalysis(analysis) {
     ? analysis.suggestion_history
     : currentSuggestions.map((item, index) => ({ ...item, id: `current-${index}`, status: "active" }));
   const orderedHistory = history.slice().sort((left, right) =>
-    String(left.created_at || "").localeCompare(String(right.created_at || ""))
+    String(right.last_seen_at || right.created_at || "").localeCompare(String(left.last_seen_at || left.created_at || ""))
   );
-  const activeCount = history.filter((item) => item.status === "active").length;
-  $("suggestion-history-count").textContent = `${activeCount} 条待处理 · 共 ${history.length} 条`;
-  const urgent = history.find((item) =>
-    item.status === "active" && currentIds.has(item.id) && item.priority === "high"
-    && (
-      item.source === "llm_semantic_evidence_gap"
-      || item.answer_status === "shallow"
-      || String(item.reason || "").includes("回答较浅")
-    )
-  );
+  const urgent = orderedHistory.find(item => item.status === "active" && currentIds.has(item.id));
+  const pending = orderedHistory.filter(item => item.status === "active" && item !== urgent);
+  const archived = orderedHistory.filter(item => item.status !== "active");
+  $("suggestion-history-count").textContent = `${urgent ? "1 条当前 · " : ""}${pending.length} 条待处理`;
+  const actions = item => `<div class="suggestion-actions"><button type="button" class="confirm" data-suggestion-id="${escapeHtml(item.id)}" data-suggestion-action="addressed">已追问</button><button type="button" class="secondary" data-suggestion-id="${escapeHtml(item.id)}" data-suggestion-action="skipped">暂不追问</button></div>`;
+  const source = item => String(item.question_id || "").startsWith("adhoc:") ? "面试官临场问题" : "核心问题";
   $("urgent-followup").classList.toggle("hidden", !urgent);
-  $("urgent-followup-source").textContent = urgent?.source_question_text ? `对应原问题：${urgent.source_question_text}` : "";
+  $("urgent-followup-source").textContent = urgent ? `来源：${source(urgent)} · 原问题：${urgent.source_question_text || ""}` : "";
   $("urgent-followup-question").textContent = urgent?.question || "";
-  $("urgent-followup-reason").textContent = urgent?.reason || "";
-  if (urgent?.id && state.lastUrgentSuggestionId !== urgent.id) {
-    state.lastUrgentSuggestionId = urgent.id;
-    toast("候选人回答较浅：右侧已生成立即追问建议");
-  } else if (!urgent) {
-    state.lastUrgentSuggestionId = null;
+  $("urgent-followup-reason").textContent = urgent ? `为什么建议问：${urgent.reason || ""}` : "";
+  $("urgent-followup-basis").textContent = urgent?.basis_quote ? `依据原话：“${urgent.basis_quote}”` : "";
+  const currentActions = urgent ? actions(urgent) : "";
+  if ($("urgent-followup-actions").innerHTML !== currentActions) {
+    $("urgent-followup-actions").innerHTML = currentActions;
+    $("urgent-followup-actions").querySelectorAll("[data-suggestion-action]").forEach(button => button.addEventListener("click", updateSuggestionStatus));
   }
-  const suggestionStatusLabels = { active: "待处理", addressed: "已追问", skipped: "已略过", deferred: "已收起" };
-  const suggestionCard = (item) => {
-    const isCurrent = currentIds.has(item.id) && item.status === "active";
-    return `<article class="suggestion ${escapeHtml(item.priority || "normal")} ${item.status !== "active" ? "resolved" : ""} ${isCurrent ? "current" : ""}">
-      <div class="suggestion-meta"><span>${isCurrent ? "当前建议" : escapeHtml(suggestionStatusLabels[item.status] || "已记录")}</span>${item.source === "question_gap" ? "<span>回答深度</span>" : ""}</div>
-      ${item.source_question_text ? `<small class="suggestion-source-question"><strong>对应原问题：</strong>${escapeHtml(item.source_question_text)}</small>` : ""}
-      ${item.basis_quote ? `<small class="suggestion-basis">依据候选人原话：“${escapeHtml(item.basis_quote)}”</small>` : ""}
-      <small>${escapeHtml(item.reason)}</small>
-      <p>${escapeHtml(item.question)}</p>
-      ${item.status === "active" && !String(item.id).startsWith("current-") ? `<div class="suggestion-actions"><button type="button" class="confirm" data-suggestion-id="${escapeHtml(item.id)}" data-suggestion-action="addressed">已追问</button><button type="button" class="secondary" data-suggestion-id="${escapeHtml(item.id)}" data-suggestion-action="skipped">暂不追问</button></div>` : ""}
-    </article>`;
-  };
-  const activeSuggestions = orderedHistory.filter((item) => item.status === "active").slice(0, 3);
-  const archivedSuggestions = orderedHistory.filter((item) => !activeSuggestions.includes(item));
-  const emptySuggestionText = state.interview?.status !== "in_progress"
-    ? "面试开始并出现候选人回答后，这里才会生成追问。"
-    : analysis.availability === "waiting_for_candidate_answer"
-      ? "等待候选人回答后生成追问。"
-      : analysis.availability === "semantic_analysis_pending"
-        ? "AI 正在理解这段回答；没有高价值追问时这里会保持为空。"
-      : "当前暂无高价值追问。";
-  const suggestionHtml = `${activeSuggestions.map(suggestionCard).join("") || `<p class="muted">${emptySuggestionText}</p>`}${archivedSuggestions.length ? `<details class="suggestion-archive"><summary>查看已处理或已收起的 ${archivedSuggestions.length} 条建议</summary>${archivedSuggestions.map(suggestionCard).join("")}</details>` : ""}`;
+  const suggestionLabels = { addressed: "已追问", skipped: "暂不追问", resolved: "已自然补齐", deferred: "已收起" };
+  const compact = item => `<details class="suggestion-compact" data-suggestion-detail="${escapeHtml(item.id)}"><summary>${escapeHtml(item.question)}</summary><small>来源：${source(item)} · 原问题：${escapeHtml(item.source_question_text || "")}</small><p>为什么建议问：${escapeHtml(item.reason || "")}</p><blockquote>${escapeHtml(item.basis_quote || "")}</blockquote>${item.status === "active" ? actions(item) : `<small>${suggestionLabels[item.status] || "历史"}</small>`}</details>`;
+  const empty = state.interview?.status !== "in_progress" ? "面试开始并出现真实问答后生成建议。" : "正在跟随当前对话，没有需要立即追问的明确缺口。";
+  const suggestionHtml = `${!urgent ? `<p class="muted">${empty}</p>` : ""}${pending.length ? `<h4>待处理 ${pending.length}</h4><div class="suggestion-backlog">${pending.slice(0, 3).map(compact).join("")}${pending.length > 3 ? `<details data-suggestion-detail="all"><summary>查看全部（另 ${pending.length - 3} 条）</summary>${pending.slice(3).map(compact).join("")}</details>` : ""}</div>` : ""}${archived.length ? `<details class="suggestion-archive" data-suggestion-detail="history"><summary>历史 ${archived.length}</summary><div class="suggestion-backlog">${archived.map(compact).join("")}</div></details>` : ""}`;
   const suggestionList = $("suggestion-list");
-  if (suggestionList.innerHTML !== suggestionHtml) {
+  if (suggestionList._suggestionMarkup !== suggestionHtml) {
+    const opened = new Set([...suggestionList.querySelectorAll("details[open]")].map(item => item.dataset.suggestionDetail));
+    const scrollTop = suggestionList.querySelector(".suggestion-backlog")?.scrollTop || 0;
     suggestionList.innerHTML = suggestionHtml;
-    suggestionList.querySelectorAll("[data-suggestion-action]").forEach((button) => button.addEventListener("click", updateSuggestionStatus));
+    suggestionList._suggestionMarkup = suggestionHtml;
+    suggestionList.querySelectorAll("details").forEach(item => { item.open = opened.has(item.dataset.suggestionDetail); });
+    const backlog = suggestionList.querySelector(".suggestion-backlog");
+    if (backlog) backlog.scrollTop = scrollTop;
+    suggestionList.querySelectorAll("[data-suggestion-action]").forEach(button => button.addEventListener("click", updateSuggestionStatus));
   }
 
   const evidence = analysis.evidence || [];
@@ -3257,6 +3246,7 @@ function renderAnswerLogicReview(review = {}) {
     <article class="logic-dimension ${escapeHtml(item.status || "unknown")}">
       <div><strong>${escapeHtml(item.name || item.id)}</strong><span>${escapeHtml(statusLabels[item.status] || "待核验")}</span></div>
       <p>${escapeHtml(item.explanation || "尚无足够信息。")}</p>
+      ${(item.question_quotes || []).map(text => `<small><strong>面试官问题：</strong>${escapeHtml(text)}</small>`).join("")}
       ${(item.quotes || []).length ? `<small>${item.quotes.map((quote) => `“${escapeHtml(quote.quote)}”`).join("；")}</small>` : ""}
     </article>`).join("")}</div>` : "";
   const flagsHtml = flags.length ? `<div class="logic-flags"><h4>需要面试官复核的表述</h4>${flags.map((item) => `
@@ -3302,6 +3292,7 @@ function renderScorecard(scorecard) {
     const evidenceScore = aiRecommendation.overall_score == null ? "暂不可评" : `${aiRecommendation.overall_score} / 5`;
     const batchText = conversationAssessment.total_batches ? ` · 已分析 ${conversationAssessment.completed_batches}/${conversationAssessment.total_batches} 个完整对话批次` : "";
     $("recommendation").innerHTML = `<div class="ai-recommendation-head"><strong>AI 建议：${escapeHtml(aiRecommendation.label || "请结合完整对话人工判断")}</strong></div><div class="evaluation-scope"><strong>本轮方式：自由对话证据评分</strong><span>${escapeHtml((evaluationScope.interviewer_names || []).join("、") || "本轮面试官")} · 不拆能力维度 · ${escapeHtml(evaluationScope.transcript_scope || "本轮全部真实问答")}</span><em>不要求按预设题提问${escapeHtml(batchText)}</em></div><div class="ai-recommendation-metrics"><span><small>岗位证据参考分</small>${escapeHtml(evidenceScore)}</span><span><small>回答质量参考</small>${escapeHtml(responseScore)}</span><span><small>浅回答</small>${dialogue.shallow_answer_count || 0} 个</span></div><p>${escapeHtml(dialogue.summary || aiRecommendation.rationale || scorecard.recommendation.summary)}</p>${(dialogue.observations || []).length ? `<ul>${dialogue.observations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}${(dialogue.risks || []).length ? `<div class="process-warning">${escapeHtml(dialogue.risks.join("；"))}</div>` : ""}${responseQuality.rationale ? `<p class="response-quality-rationale"><strong>${escapeHtml(responseQuality.label || "回答质量观察")}：</strong>${escapeHtml(responseQuality.rationale)}</p>` : ""}<small>置信度 ${Math.round((aiRecommendation.confidence || 0) * 100)}% · ${escapeHtml(scorecard.recommendation.policy)}</small>${humanDecision ? `<hr><strong>面试官结论：${escapeHtml(decisionLabels[humanDecision.decision] || humanDecision.decision)}</strong>${humanDecision.summary_notes ? `<br>${escapeHtml(humanDecision.summary_notes)}` : ""}` : ""}`;
+    $("recommendation").insertAdjacentHTML("beforeend", recommendationReasons(aiRecommendation));
     const summary = scorecard.recommendation.question_evidence_summary || {};
     $("question-evidence-summary").innerHTML = `<article class="evidence-summary-item"><small>实际提问</small><strong>${dialogue.interviewer_question_count || summary.total || 0}</strong></article><article class="evidence-summary-item"><small>回答充分</small><strong>${dialogue.substantive_answer_count || summary.evidenced || 0}</strong></article><article class="evidence-summary-item shallow"><small>回答较浅</small><strong>${dialogue.shallow_answer_count || summary.shallow || 0}</strong></article>`;
     $("jd-assessment-list").innerHTML = "";
@@ -3321,6 +3312,7 @@ function renderScorecard(scorecard) {
   const scopeNames = (evaluationScope.dimensions || []).map((item) => item.competency_name).slice(0, 8);
   $("recommendation").innerHTML = `<div class="ai-recommendation-head"><strong>AI 建议：${escapeHtml(aiRecommendation.label || (scorecard.recommendation.decision === "insufficient_evidence" ? "补充证据后再判断" : "进入人工评审"))}</strong></div><div class="evaluation-scope"><strong>本轮评价范围：${escapeHtml(evaluationScope.round_label || roundLabel(state.currentRoundType))}</strong><span>${escapeHtml((evaluationScope.interviewer_names || []).join("、") || "本轮面试官")} · ${(evaluationScope.dimensions || []).length} 项维度 · ${escapeHtml(evaluationScope.transcript_scope || "本轮全部真实问答")}</span>${scopeNames.length ? `<small>${escapeHtml(scopeNames.join(" · "))}</small>` : ""}<em>${evaluationScope.planned_question_dependency === false ? "不要求按预设题提问" : ""}${conversationAssessment.total_batches ? ` · 已复盘 ${conversationAssessment.completed_batches}/${conversationAssessment.total_batches} 个对话批次` : ""}</em></div><div class="ai-recommendation-metrics"><span><small>岗位证据分</small>${escapeHtml(evidenceScore)}</span><span><small>回答质量分</small>${escapeHtml(responseScore)}</span><span><small>面试完整度</small>${escapeHtml(completenessScore)}</span></div><p>${escapeHtml(aiRecommendation.rationale || scorecard.recommendation.summary)}</p>${responseQuality.rationale ? `<p class="response-quality-rationale"><strong>${escapeHtml(responseQuality.label || "回答质量观察")}：</strong>${escapeHtml(responseQuality.rationale)}</p>` : ""}${aiRecommendation.process_warning ? `<div class="process-warning">${escapeHtml(aiRecommendation.process_warning)}</div>` : ""}<small>置信度 ${Math.round((aiRecommendation.confidence || 0) * 100)}% · ${escapeHtml(scorecard.recommendation.policy)}</small>${responseQuality.boundary ? `<small class="response-boundary">${escapeHtml(responseQuality.boundary)}</small>` : ""}${humanDecision ? `<hr><strong>面试官结论：${escapeHtml(decisionLabels[humanDecision.decision] || humanDecision.decision)}</strong>${humanDecision.summary_notes ? `<br>${escapeHtml(humanDecision.summary_notes)}` : ""}<br><small>候选人阶段尚未自动变更</small>` : ""}`;
 
+  $("recommendation").insertAdjacentHTML("beforeend", recommendationReasons(aiRecommendation));
   const evidenceSummary = scorecard.recommendation.question_evidence_summary || {};
   $("question-evidence-summary").innerHTML = `
     <article class="evidence-summary-item"><small>纳入跟踪的问题</small><strong>${evidenceSummary.tracked_total || 0}</strong></article>
@@ -3372,6 +3364,12 @@ function renderScorecard(scorecard) {
   $("human-decision").value = humanDecision?.decision || "";
   $("scorecard-notes").value = humanDecision?.summary_notes || "";
   $("scorecard-submit-form").querySelector("button").textContent = scorecard.status === "submitted" ? "更新人工评价" : "提交人工评价";
+}
+
+function recommendationReasons(ai) {
+  return [["支持判断", ai.positive_evidence], ["风险 / 未确认", ai.risks], ["关键未知项", ai.unknowns]]
+    .filter(([, items]) => items?.length).map(([label, items]) => `<div class="recommendation-reasons"><strong>${label}</strong><ul>${items.map(text => `<li>${escapeHtml(text)}</li>`).join("")}</ul></div>`).join("")
+    + '<p class="response-boundary">AI 建议，仅供面试官参考。候选人阶段不会自动改变。</p>';
 }
 
 function renderSidebarScore(scorecard) {

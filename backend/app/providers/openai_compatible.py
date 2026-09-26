@@ -23,7 +23,7 @@ from ..models import (
     utc_now,
 )
 from ..services.company_profile import active_company_profile
-from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments
+from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, is_clarification_response
 from ..services.evaluation_scope import round_evaluation_dimensions
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
@@ -116,7 +116,7 @@ class OpenAICompatibleProvider:
             return self._with_status(baseline, "ready")
         if not self._should_enrich_live(
             interview.id,
-            str(baseline.get("active_question_id") or "conversation"),
+            str(baseline.get("active_question_id") or ((baseline.get("interviewer_turns") or [{}])[-1].get("segment_ids") or ["conversation"])[0]),
             int(answer_context["character_count"]),
         ):
             # Between semantic refreshes, keep a stable local shallow-answer
@@ -133,6 +133,12 @@ class OpenAICompatibleProvider:
         competencies = [] if conversation_mode else round_evaluation_dimensions(db, interview, job)
         questions = [] if conversation_mode else list((interview.plan_payload or {}).get("questions", []))
         question_context = _live_question_context(questions, baseline)
+        current_turn = (baseline.get("interviewer_turns") or [None])[-1]
+        if current_turn and not baseline.get("active_question_id"):
+            provisional_id = f"adhoc:{current_turn['segment_ids'][0]}"
+            question_context.insert(0, {"question_id": provisional_id, "competency_id": "interviewer_ad_hoc",
+                "question": current_turn["text"], "source": "interviewer_ad_hoc", "is_current": True})
+            answer_context["question_id"] = provisional_id
         active_profile = active_company_profile(db)
         prompt_payload = {
             "job_title": job.title,
@@ -166,11 +172,17 @@ class OpenAICompatibleProvider:
             ],
             "latest_segment_id": latest_segment.id,
             "current_answer_context": answer_context,
+            "interviewer_logical_turn": current_turn,
+            "pending_suggestions": [item for item in (interview.suggestion_history or []) if item.get("status") == "active"],
         }
         try:
             output = self._chat_json(
                 instructions=(
                     "你是人工面试官的实时思考伙伴，不是 STAR 问题生成器。必须先理解面试官究竟在问什么、候选人的回答解决了什么、暴露了什么关键认知。"
+                    "先结合前后说话人和上下文返回 turn_intent：interview_question/small_talk/transition/confirmation/instruction/candidate_question_response/administrative。"
+                    "只有真正索取岗位相关经历、行为或判断的 interview_question 可以追问，不能仅看问号或是否匹配题库。"
+                    "判断完整逻辑回答是否已形成 answer_complete；还在铺陈、列举或句子未完成时返回 false 和空建议。"
+                    "候选人之后已自然补齐某个 pending_suggestions 的具体缺口时，在 resolved_suggestions 引用其 id 和新增候选人片段；没有补齐不能因为本次没有建议就将其解决。"
                     + ("当前是自由对话分析模式：只跟随面试官实际提出的问题，不得匹配、评分或补造任何能力维度。" if conversation_mode else "")
                     + "只有追问能显著改变面试官对候选人的认知时才返回一条建议；没有高价值追问时必须返回空数组。"
                     "优先寻找回答内部矛盾、关键机制、本人判断与团队方案的边界、取舍依据、失败原因、认知上限，以及岗位本质与候选人经历之间的落差。"
@@ -199,8 +211,22 @@ class OpenAICompatibleProvider:
                 segments, output.get("transcript_corrections", [])
             )
             db.flush()
-            self._persist_validated_evidence(db, interview, competencies, segments, output.get("evidence", []))
             refreshed = self.fallback.analyze_live(db, interview, job)
+            intent = output.get("turn_intent")
+            if current_turn and isinstance(intent, dict):
+                from ..services.question_analysis import TURN_TYPES
+                if intent.get("turn_type") in TURN_TYPES and isinstance(intent.get("confidence"), (int, float)) and intent["confidence"] >= .7:
+                    plan = dict(interview.plan_payload or {})
+                    cached = dict(plan.get("turn_intents") or {})
+                    cached[current_turn["segment_ids"][0]] = {**intent, "text": current_turn["text"]}
+                    plan["turn_intents"] = cached
+                    interview.plan_payload = plan
+                    refreshed = self.fallback.analyze_live(db, interview, job)
+                    question_context = _live_question_context(questions, refreshed)
+                    answer_context = _current_candidate_answer_context(segments, refreshed)
+            if refreshed.get("active_question_id"):
+                self._persist_validated_evidence(db, interview, competencies, segments, output.get("evidence", []))
+                refreshed = self.fallback.analyze_live(db, interview, job)
             refreshed["suggestions"] = self._validated_suggestions(
                 output.get("suggestions", []),
                 [],
@@ -209,6 +235,16 @@ class OpenAICompatibleProvider:
                 segments,
                 answer_context,
             )
+            if not refreshed.get("active_question_id") or output.get("answer_complete") is False:
+                refreshed["suggestions"] = []
+            candidate_ids = set(answer_context["source_segment_ids"])
+            old_by_id = {item["id"]: item for item in (interview.suggestion_history or [])}
+            refreshed["resolved_suggestion_ids"] = [item["suggestion_id"] for item in output.get("resolved_suggestions", [])
+                if isinstance(item, dict) and item.get("suggestion_id") in old_by_id
+                and old_by_id[item["suggestion_id"]].get("question_id") == refreshed.get("active_question_id")
+                and set(item.get("evidence_segment_ids") or []) & candidate_ids
+                and set(item.get("evidence_segment_ids") or []).issubset(candidate_ids)
+                and set(item.get("evidence_segment_ids") or []) - set(old_by_id[item["suggestion_id"]].get("evidence_segment_ids") or [])]
             refreshed["transcript_corrections"] = transcript_corrections
             self._reset_live_failures(interview.id)
             return self._with_status(refreshed, "active")
@@ -231,7 +267,7 @@ class OpenAICompatibleProvider:
         key = f"{interview_id}:{question_id}"
         with self._live_state_lock:
             previous = self._live_answer_sizes.get(key)
-            if previous is not None and character_count - previous < 18:
+            if previous is not None and character_count == previous:
                 return False
             self._live_answer_sizes[key] = character_count
             return True
@@ -464,8 +500,10 @@ class OpenAICompatibleProvider:
                 baseline["model_assistance"] = self._status("ready")
                 return baseline
             try:
+                self._attach_answer_logic_review(baseline, interview, job, dialogue_segments)
                 judgment = self._assess_free_dialogue(
-                    db, interview, job, dialogue_segments
+                    db, interview, job, dialogue_segments,
+                    response_review=baseline["recommendation"].get("answer_logic_review"),
                 )
             except IntelligenceProviderError as error:
                 recommendation = baseline["recommendation"]
@@ -500,6 +538,9 @@ class OpenAICompatibleProvider:
                 "candidate_stage_changed": False,
                 "planned_question_dependency": False,
                 "evidence_segment_ids": judgment["evidence_segment_ids"],
+                "positive_evidence": judgment["positive_evidence"],
+                "risks": judgment["risks"],
+                "unknowns": judgment["unknowns"],
             }
             recommendation["dialogue_analysis"]["summary"] = judgment["rationale"]
             recommendation["dialogue_analysis"]["observations"] = judgment["positive_evidence"]
@@ -508,15 +549,12 @@ class OpenAICompatibleProvider:
             recommendation["conversation_assessment"] = judgment["batch_status"]
             if judgment["next_round_questions"]:
                 baseline["next_round_questions"] = judgment["next_round_questions"]
-            self._attach_answer_logic_review(
-                baseline, interview, job, dialogue_segments
-            )
             baseline["model_assistance"] = self._status(
                 "active" if judgment["batch_status"]["failed_batches"] == 0 else "partial"
             )
             return baseline
         all_segments = self._segments(db, interview.id, limit=None)
-        segments = all_segments[-24:]
+        segments = all_segments
         evidence = [
             item
             for item in db.scalars(
@@ -628,6 +666,17 @@ class OpenAICompatibleProvider:
             self._attach_answer_logic_review(
                 baseline, interview, job, all_segments
             )
+            try:
+                judgment = self._assess_free_dialogue(db, interview, job, all_segments,
+                    response_review=baseline["recommendation"].get("answer_logic_review"))
+            except IntelligenceProviderError:
+                judgment = None
+            if judgment:
+                baseline["recommendation"]["ai_recommendation"].update({key: judgment[key] for key in (
+                    "decision", "label", "overall_score", "confidence", "rationale", "positive_evidence", "risks", "unknowns", "evidence_segment_ids")})
+            else:
+                baseline["recommendation"]["ai_recommendation"].update(decision="supplementary_interview",
+                    label="补充验证后再判断", rationale="岗位证据参考已保留，综合语义判断尚未完成；请核实关键未知项。")
             baseline["model_assistance"] = self._status(
                 "active" if batch_status["failed_batches"] == 0 else "partial"
             )
@@ -648,15 +697,19 @@ class OpenAICompatibleProvider:
         local_review = baseline.get("recommendation", {}).get("answer_logic_review")
         candidate_count = sum(
             item.speaker_role == "candidate"
-            and is_evidence_worthy_utterance(item.effective_text)
+            and (is_evidence_worthy_utterance(item.effective_text) or is_clarification_response(item.effective_text))
             for item in segments
         )
-        if candidate_count < 2:
+        if candidate_count < 1:
             return
         try:
             output = self._chat_json(
                 instructions=(
                     "你是面试回答逻辑与可信度核验助手。无论面试官是否使用固定题，都要理解真实问题语境，"
+                    "逐一评价 question_comprehension、response_relevance、information_structure、causal_coherence、decision_reasoning、clarification_behavior、consistency。"
+                    "每项必须绑定真实面试官问题与候选人回答；segment_ids 引用候选人，question_segment_ids 引用对应面试官。"
+                    "短而直接的回答可以得高分；长但绕开选择依据的回答应说明不对题。主动澄清歧义是正向表现。未涉及则 unknown。"
+                    "仅评价本轮回答表现，不推断智力、人格或长期潜力。禁止年龄、出生年份、性别、婚育、籍贯、外貌及工作年限加减分；只参考目标岗位职责复杂度。"
                     "检查候选人回答中的因果连贯性、时间线一致性、本人贡献与团队贡献边界、成果口径和跨回答表述一致性。"
                     "只能引用 speaker_role=candidate 的片段 ID；面试官的话只能用于理解语境。"
                     "不得根据语速、停顿、口音、紧张、表情或措辞习惯推断欺骗，不得输出‘撒谎、说谎、造假、欺骗’等定性。"
@@ -673,7 +726,7 @@ class OpenAICompatibleProvider:
                         {
                             "segment_id": item.id,
                             "speaker_role": item.speaker_role,
-                            "text": item.effective_text[:600],
+                            "text": item.effective_text,
                         }
                         for item in segments
                     ],
@@ -693,6 +746,13 @@ class OpenAICompatibleProvider:
         validated = self._validated_answer_logic(output, segments)
         if validated is not None:
             baseline["recommendation"]["answer_logic_review"] = validated
+            if any(item["id"] == "response_relevance" for item in validated["dimensions"]):
+                baseline["recommendation"]["response_quality"] = {
+                    "score": validated["logic_score"], "label": "问题理解与回答质量",
+                    "confidence": validated["confidence"], "rationale": validated["summary"],
+                    "evidence_segment_ids": validated["evidence_segment_ids"],
+                    "boundary": "仅评价本轮回答表现，不推断智力、人格或长期潜力。",
+                }
 
     @staticmethod
     def _validated_answer_logic(
@@ -705,9 +765,9 @@ class OpenAICompatibleProvider:
             item.id: item
             for item in segments
             if item.speaker_role == "candidate"
-            and is_evidence_worthy_utterance(item.effective_text)
+            and (is_evidence_worthy_utterance(item.effective_text) or is_clarification_response(item.effective_text))
         }
-        if len(candidate_segments) < 2 or not proposed.get("sufficient_evidence"):
+        if not candidate_segments or not proposed.get("sufficient_evidence"):
             return None
         try:
             logic_score = int(proposed.get("logic_score"))
@@ -717,6 +777,12 @@ class OpenAICompatibleProvider:
         if not 1 <= logic_score <= 5:
             return None
         allowed_dimensions = {
+            "question_comprehension": "问题理解",
+            "response_relevance": "回答相关性",
+            "information_structure": "信息结构",
+            "decision_reasoning": "判断依据",
+            "clarification_behavior": "澄清能力",
+            "consistency": "一致性",
             "causal_coherence": "因果连贯性",
             "timeline_consistency": "时间线一致性",
             "ownership_consistency": "责任边界一致性",
@@ -725,7 +791,9 @@ class OpenAICompatibleProvider:
         }
         allowed_statuses = {"coherent", "needs_verification", "unknown"}
         dimensions = []
-        for item in proposed.get("dimensions", [])[:5]:
+        from ..services.question_analysis import analyze_question_answers
+        pairs = analyze_question_answers([], segments, [])["states"]
+        for item in proposed.get("dimensions", [])[:11]:
             if not isinstance(item, dict):
                 continue
             dimension_id = str(item.get("id", ""))
@@ -739,6 +807,15 @@ class OpenAICompatibleProvider:
                     if str(value) in candidate_segments
                 )
             )[:4]
+            if status != "unknown" and not referenced:
+                continue
+            if dimension_id in {"question_comprehension", "response_relevance", "information_structure", "decision_reasoning", "clarification_behavior"}:
+                question_ids = [sid for sid in item.get("question_segment_ids", []) if any(
+                    segment.id == sid and segment.speaker_role == "interviewer" for segment in segments)]
+                if not question_ids or not any(pair["question_id"] == f"adhoc:{qid}" and set(referenced) & set(pair["evidence_segment_ids"]) for pair in pairs for qid in question_ids):
+                    continue
+            else:
+                question_ids = []
             dimensions.append(
                 {
                     "id": dimension_id,
@@ -746,6 +823,8 @@ class OpenAICompatibleProvider:
                     "status": status,
                     "explanation": str(item.get("explanation", ""))[:300],
                     "segment_ids": referenced,
+                    "question_segment_ids": question_ids,
+                    "question_quotes": [segment.effective_text for segment in segments if segment.id in question_ids],
                     "quotes": quotes_for_segments(referenced, candidate_segments),
                 }
             )
@@ -821,6 +900,8 @@ class OpenAICompatibleProvider:
             min(0.9, max(0.2, proposed_confidence), 0.35 + 0.08 * len(evidence_segment_ids)),
             2,
         )
+        if not evidence_segment_ids:
+            return None
         return {
             "status": "model_assessed",
             "sufficient_evidence": True,
@@ -1019,6 +1100,7 @@ class OpenAICompatibleProvider:
         interview: InterviewRound,
         job: Job,
         segments: list[TranscriptSegment],
+        response_review: dict | None = None,
     ) -> dict[str, Any] | None:
         application = db.get(Application, interview.application_id)
         candidate = db.get(Candidate, application.candidate_id) if application else None
@@ -1053,6 +1135,8 @@ class OpenAICompatibleProvider:
                         "候选人的嗯、哦、确认词和反问也不能成为岗位证据。回答缺失只能降低置信度，不能被解释成负面能力。"
                         "不得使用性别、年龄、婚育、家庭、籍贯、学校或公司光环评分，不得推断人格、智力或潜力。"
                         "可以建议进入下一轮、补充面试、保留讨论或不建议进入下一轮，但不得自动改变候选人阶段。"
+                        "decision 必须综合岗位关键要求、正向事实、真实风险、unknowns、本轮职责、回答相关性和证据置信度；禁止仅按平均分阈值。"
+                        "未问到、回答短、ASR不确定、没按核心题问均属于未知，不是负向事实。不建议下一轮时必须在 risk_evidence_segment_ids 引用直接体现岗位风险的原话。"
                     ),
                     payload={
                         "candidate_name_reference_only": candidate.display_name if candidate else "",
@@ -1060,6 +1144,7 @@ class OpenAICompatibleProvider:
                         "job_title": job.title,
                         "jd_reference": job.jd_text[:2600],
                         "configured_round_type": interview.round_type,
+                        "answer_quality_review": response_review,
                         "actual_interviewers": list(interview.interviewer_names or []),
                         "batch": {"index": index + 1, "total": len(batches)},
                         "transcript": [
@@ -1104,6 +1189,9 @@ class OpenAICompatibleProvider:
                     "risks": [str(item)[:240] for item in output.get("risks", []) if str(item).strip()][:4],
                     "evidence_segment_ids": referenced,
                     "next_round_questions": list(output.get("next_round_questions", []))[:3],
+                    "decision": output.get("decision", "supplementary_interview"),
+                    "unknowns": [str(value)[:240] for value in output.get("unknowns", [])],
+                    "risk_evidence_segment_ids": [sid for sid in output.get("risk_evidence_segment_ids", []) if sid in batch_candidate_ids],
                 }
             )
         if not results:
@@ -1132,14 +1220,17 @@ class OpenAICompatibleProvider:
                 if segment_id in all_candidate_ids
             )
         )[:12]
-        if overall_score >= 3.7:
-            decision, label = "advance", "建议进入下一轮，继续核实关键事实"
-        elif overall_score >= 2.8:
-            decision, label = "supplementary_interview", "建议补充验证后再决定"
-        elif overall_score >= 2.2 or confidence < 0.7:
-            decision, label = "hold", "建议保留讨论，并补充关键证据"
+        unknowns = list(dict.fromkeys(value for item in results for value in item["unknowns"]))
+        # Direction comes from contextual judgments, never an average-score cutoff.
+        decisions = {item["decision"] for item in results}
+        if failed or confidence < .7 or unknowns or len(decisions) != 1:
+            decision, label = "supplementary_interview", "补充验证后再判断"
+        elif decisions == {"reject"} and all(item["risks"] and item["risk_evidence_segment_ids"] for item in results):
+            decision, label = "reject", "不建议进入下一轮"
+        elif decisions == {"advance"} and all(item["positive_evidence"] and not item["risks"] for item in results):
+            decision, label = "advance", "建议进入下一轮"
         else:
-            decision, label = "reject", "不建议进入下一轮，需人工复核证据"
+            decision, label = "hold", "暂缓判断"
         positive_evidence = list(
             dict.fromkeys(text for item in results for text in item["positive_evidence"])
         )[:6]
@@ -1178,6 +1269,7 @@ class OpenAICompatibleProvider:
             "rationale": rationale,
             "positive_evidence": positive_evidence,
             "risks": risks,
+            "unknowns": unknowns,
             "evidence_segment_ids": evidence_segment_ids,
             "next_round_questions": next_round_questions,
             "batch_status": {
@@ -1370,14 +1462,9 @@ class OpenAICompatibleProvider:
         enough = len(scored) >= minimum_dimensions
         recommendation = baseline["recommendation"]
         ai = recommendation["ai_recommendation"]
-        if not enough:
-            decision, label = "supplementary_interview", "补充证据后再判断"
-        elif overall >= 3.5:
-            decision, label = "advance", "建议进入下一轮"
-        elif overall < 2.5:
-            decision, label = "reject", "暂不建议进入下一轮"
-        else:
-            decision, label = "hold", "保留讨论"
+        # Direction is decided by the separate contextual dialogue review,
+        # never by a mean-score threshold, including when that review fails.
+        decision, label = "supplementary_interview", "等待语义方向评价"
         ai.update(
             {
                 "decision": decision,
@@ -1913,6 +2000,13 @@ def _live_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "turn_intent": {"type": "object", "additionalProperties": False,
+                "properties": {"turn_type": {"type": "string", "enum": ["interview_question", "small_talk", "transition", "confirmation", "instruction", "candidate_question_response", "administrative"]}, "confidence": {"type": "number"}, "reason": {"type": "string"}},
+                "required": ["turn_type", "confidence", "reason"]},
+            "answer_complete": {"type": "boolean"},
+            "resolved_suggestions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                "properties": {"suggestion_id": {"type": "string"}, "evidence_segment_ids": {"type": "array", "items": {"type": "string"}}},
+                "required": ["suggestion_id", "evidence_segment_ids"]}},
             "suggestions": {
                 "type": "array",
                 "maxItems": 1,
@@ -1977,7 +2071,7 @@ def _live_schema() -> dict[str, Any]:
                 },
             },
         },
-        "required": ["suggestions", "evidence", "transcript_corrections"],
+        "required": ["suggestions", "evidence", "transcript_corrections", "turn_intent", "answer_complete", "resolved_suggestions"],
     }
 
 
@@ -2109,6 +2203,8 @@ def _answer_logic_schema() -> dict[str, Any]:
             "id": {
                 "type": "string",
                 "enum": [
+                    "question_comprehension", "response_relevance", "information_structure",
+                    "decision_reasoning", "clarification_behavior", "consistency",
                     "causal_coherence",
                     "timeline_consistency",
                     "ownership_consistency",
@@ -2126,8 +2222,9 @@ def _answer_logic_schema() -> dict[str, Any]:
                 "maxItems": 4,
                 "items": {"type": "string"},
             },
+            "question_segment_ids": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["id", "status", "explanation", "segment_ids"],
+        "required": ["id", "status", "explanation", "segment_ids", "question_segment_ids"],
     }
     flag = {
         "type": "object",
@@ -2175,7 +2272,7 @@ def _answer_logic_schema() -> dict[str, Any]:
             "summary": {"type": "string"},
             "dimensions": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": 11,
                 "items": dimension,
             },
             "consistency_flags": {
@@ -2207,6 +2304,9 @@ def _free_dialogue_batch_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "decision": {"type": "string", "enum": ["advance", "supplementary_interview", "hold", "reject", "insufficient_evidence"]},
+            "unknowns": {"type": "array", "items": {"type": "string"}},
+            "risk_evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
             "sufficient_evidence": {"type": "boolean"},
             "score": {"type": "number", "minimum": 1, "maximum": 5},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -2243,6 +2343,7 @@ def _free_dialogue_batch_schema() -> dict[str, Any]:
             },
         },
         "required": [
+            "decision", "unknowns", "risk_evidence_segment_ids",
             "sufficient_evidence",
             "score",
             "confidence",

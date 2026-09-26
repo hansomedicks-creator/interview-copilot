@@ -201,7 +201,7 @@ def build_plan(
     return {
         "version": "plan-v1.1",
         "interview_mode": interview.interview_mode,
-        "mode_label": "结构化提问与评分" if interview.interview_mode == "structured" else "自由对话分析",
+        "mode_label": "智能混合面试" if interview.interview_mode == "structured" else "旧版自由对话",
         "question_bank_version": f"{interview.round_type}-standard-v0.1",
         "personalization_version": "resume-evidence-first-v1.0",
         "round_type": interview.round_type,
