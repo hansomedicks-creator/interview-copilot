@@ -1542,6 +1542,11 @@ body.role-admin .task-header > div > .kicker { display: none; }
 .transcript-row.candidate .speaker { color: var(--qk-purple); }
 .transcript-row.candidate .utterance { background: var(--qk-purple-soft); }
 .suggestion-panel { top: 82px; }
+.candidate-analysis-details { margin: 16px 0; border-top: 1px solid var(--border); padding-top: 12px; }
+.candidate-analysis-details > summary { cursor: pointer; color: var(--qk-purple); font-weight: 700; padding: 10px 0; }
+.candidate-analysis-details p { white-space: pre-wrap; line-height: 1.8; }
+.candidate-analysis-part { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.candidate-analysis-part blockquote { margin: 10px 0; padding: 10px 14px; border-left: 3px solid var(--qk-purple); background: #fff; font-size: 15px; line-height: 1.7; }
 .suggestion.current { border-color: #c6b9ff; box-shadow: none; }
 .urgent-followup { box-shadow: none; border: 2px solid var(--qk-purple); background: #f7f4ff; }
 .urgent-followup strong { color: var(--qk-purple); }

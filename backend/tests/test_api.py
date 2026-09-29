@@ -1863,7 +1863,7 @@ def test_scorecard_still_recommends_when_required_questions_were_missed(tmp_path
         assert ai["required_questions_total"] > 0
         assert ai["interview_completeness_score"] < 5
         assert ai["overall_score"] is not None
-        assert "不能作为候选人的负面证据" in ai["process_warning"]
+        assert ai["process_warning"] is None
         assert response_quality["score"] is None  # Offline rules cannot grade semantic relevance.
         assert answer.json()["id"] in response_quality["evidence_segment_ids"]
         assert "不推断智力" in response_quality["boundary"]
@@ -1913,6 +1913,11 @@ def test_semantic_final_review_scores_freeform_dialogue_without_planned_question
                 return {"sufficient_evidence": True, "logic_score": 4, "confidence": .8,
                         "dimensions": [{"id": "causal_coherence", "status": "coherent",
                             "explanation": "原话交代了核对顺序与检查过程", "segment_ids": candidate_ids}]}
+            if schema_name == "free_dialogue_job_evidence_batch":
+                return {"sufficient_evidence": True, "score": 4, "confidence": .85,
+                        "decision": "advance", "positive_evidence": ["说明具体核对步骤"], "risks": [], "unknowns": [],
+                        "evidence_segment_ids": candidate_ids, "risk_evidence_segment_ids": [],
+                        "rationale": "候选人能说明独立核对过程与差异检查，可建议通过本轮。", "next_round_questions": []}
             if schema_name == "full_conversation_competency_assessment":
                 return {
                     "competency_assessments": [

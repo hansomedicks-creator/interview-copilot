@@ -180,7 +180,9 @@ function renderLlmStatus(llm = {}) {
     mock_rules: "当前使用本地规则分析，未调用真实语义模型。",
   };
   const errorLabels = {
-    connection_error: "网络连接或请求超时",
+    connection_error: "模型网络连接失败",
+    timeout: "模型响应超时",
+    output_truncated: "模型输出未完成",
     upstream_error: "模型鉴权、余额、限流或上游服务异常",
     insufficient_balance: "模型账户余额不足",
     authentication_error: "模型密钥无效或权限不足",
@@ -3278,13 +3280,8 @@ function renderScorecard(scorecard) {
   if (scorecard.recommendation?.model_assistance) renderLlmStatus(scorecard.recommendation.model_assistance);
   $("scorecard").classList.remove("hidden");
   const humanDecision = scorecard.recommendation.human_decision;
-  const decisionLabels = { advance: "建议进入下一轮", supplementary_interview: "补充面试后再判断", hold: "保留讨论", reject: "不建议进入下一轮" };
   $("scorecard-status").textContent = scorecard.status === "submitted" ? "人工评价已提交" : "需人工复核";
   $("scorecard-status").classList.toggle("warning", scorecard.status !== "submitted");
-  const aiRecommendation = scorecard.recommendation.ai_recommendation || {};
-  const responseQuality = scorecard.recommendation.response_quality || {};
-  const evaluationScope = scorecard.recommendation.evaluation_scope || {};
-  const conversationAssessment = scorecard.recommendation.conversation_assessment || {};
   renderAnswerLogicReview(scorecard.recommendation.answer_logic_review || {});
   const conversationMode = scorecard.recommendation.interview_mode === "conversation" || state.interview?.interview_mode === "conversation";
   $("jd-evaluation-section").classList.toggle("hidden", conversationMode);
@@ -3292,11 +3289,7 @@ function renderScorecard(scorecard) {
   $("score-grid").classList.toggle("hidden", conversationMode);
   if (conversationMode) {
     const dialogue = scorecard.recommendation.dialogue_analysis || {};
-    const responseScore = responseQuality.score == null ? "暂不可评" : `${responseQuality.score} / 5`;
-    const evidenceScore = aiRecommendation.overall_score == null ? "暂不可评" : `${aiRecommendation.overall_score} / 5`;
-    const batchText = conversationAssessment.total_batches ? ` · 已分析 ${conversationAssessment.completed_batches}/${conversationAssessment.total_batches} 个完整对话批次` : "";
-    $("recommendation").innerHTML = `<div class="ai-recommendation-head"><strong>AI 建议：${escapeHtml(aiRecommendation.label || "请结合完整对话人工判断")}</strong></div><div class="evaluation-scope"><strong>本轮方式：自由对话证据评分</strong><span>${escapeHtml((evaluationScope.interviewer_names || []).join("、") || "本轮面试官")} · 不拆能力维度 · ${escapeHtml(evaluationScope.transcript_scope || "本轮全部真实问答")}</span><em>不要求按预设题提问${escapeHtml(batchText)}</em></div><div class="ai-recommendation-metrics"><span><small>岗位证据参考分</small>${escapeHtml(evidenceScore)}</span><span><small>回答质量参考</small>${escapeHtml(responseScore)}</span><span><small>浅回答</small>${dialogue.shallow_answer_count || 0} 个</span></div><p>${escapeHtml(dialogue.summary || aiRecommendation.rationale || scorecard.recommendation.summary)}</p>${(dialogue.observations || []).length ? `<ul>${dialogue.observations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}${(dialogue.risks || []).length ? `<div class="process-warning">${escapeHtml(dialogue.risks.join("；"))}</div>` : ""}${responseQuality.rationale ? `<p class="response-quality-rationale"><strong>${escapeHtml(responseQuality.label || "回答质量观察")}：</strong>${escapeHtml(responseQuality.rationale)}</p>` : ""}<small>置信度 ${Math.round((aiRecommendation.confidence || 0) * 100)}% · ${escapeHtml(scorecard.recommendation.policy)}</small>${humanDecision ? `<hr><strong>面试官结论：${escapeHtml(decisionLabels[humanDecision.decision] || humanDecision.decision)}</strong>${humanDecision.summary_notes ? `<br>${escapeHtml(humanDecision.summary_notes)}` : ""}` : ""}`;
-    $("recommendation").insertAdjacentHTML("beforeend", recommendationReasons(aiRecommendation));
+    renderCandidateAnalysis(scorecard);
     const summary = scorecard.recommendation.question_evidence_summary || {};
     $("question-evidence-summary").innerHTML = `<article class="evidence-summary-item"><small>实际提问</small><strong>${dialogue.interviewer_question_count || summary.total || 0}</strong></article><article class="evidence-summary-item"><small>回答充分</small><strong>${dialogue.substantive_answer_count || summary.evidenced || 0}</strong></article><article class="evidence-summary-item shallow"><small>回答较浅</small><strong>${dialogue.shallow_answer_count || summary.shallow || 0}</strong></article>`;
     $("jd-assessment-list").innerHTML = "";
@@ -3310,13 +3303,7 @@ function renderScorecard(scorecard) {
     $("scorecard-submit-form").querySelector("button").textContent = scorecard.status === "submitted" ? "更新人工评价" : "提交人工评价";
     return;
   }
-  const evidenceScore = aiRecommendation.overall_score == null ? "暂不可评" : `${aiRecommendation.overall_score} / 5`;
-  const responseScore = responseQuality.score == null ? "暂不可评" : `${responseQuality.score} / 5`;
-  const completenessScore = aiRecommendation.interview_completeness_score == null ? "待计算" : `${aiRecommendation.interview_completeness_score} / 5`;
-  const scopeNames = (evaluationScope.dimensions || []).map((item) => item.competency_name).slice(0, 8);
-  $("recommendation").innerHTML = `<div class="ai-recommendation-head"><strong>AI 建议：${escapeHtml(aiRecommendation.label || (scorecard.recommendation.decision === "insufficient_evidence" ? "补充证据后再判断" : "进入人工评审"))}</strong></div><div class="evaluation-scope"><strong>本轮评价范围：${escapeHtml(evaluationScope.round_label || roundLabel(state.currentRoundType))}</strong><span>${escapeHtml((evaluationScope.interviewer_names || []).join("、") || "本轮面试官")} · ${(evaluationScope.dimensions || []).length} 项维度 · ${escapeHtml(evaluationScope.transcript_scope || "本轮全部真实问答")}</span>${scopeNames.length ? `<small>${escapeHtml(scopeNames.join(" · "))}</small>` : ""}<em>${evaluationScope.planned_question_dependency === false ? "不要求按预设题提问" : ""}${conversationAssessment.total_batches ? ` · 已复盘 ${conversationAssessment.completed_batches}/${conversationAssessment.total_batches} 个对话批次` : ""}</em></div><div class="ai-recommendation-metrics"><span><small>岗位证据分</small>${escapeHtml(evidenceScore)}</span><span><small>回答质量分</small>${escapeHtml(responseScore)}</span><span><small>面试完整度</small>${escapeHtml(completenessScore)}</span></div><p>${escapeHtml(aiRecommendation.rationale || scorecard.recommendation.summary)}</p>${responseQuality.rationale ? `<p class="response-quality-rationale"><strong>${escapeHtml(responseQuality.label || "回答质量观察")}：</strong>${escapeHtml(responseQuality.rationale)}</p>` : ""}${aiRecommendation.process_warning ? `<div class="process-warning">${escapeHtml(aiRecommendation.process_warning)}</div>` : ""}<small>置信度 ${Math.round((aiRecommendation.confidence || 0) * 100)}% · ${escapeHtml(scorecard.recommendation.policy)}</small>${responseQuality.boundary ? `<small class="response-boundary">${escapeHtml(responseQuality.boundary)}</small>` : ""}${humanDecision ? `<hr><strong>面试官结论：${escapeHtml(decisionLabels[humanDecision.decision] || humanDecision.decision)}</strong>${humanDecision.summary_notes ? `<br>${escapeHtml(humanDecision.summary_notes)}` : ""}<br><small>候选人阶段尚未自动变更</small>` : ""}`;
-
-  $("recommendation").insertAdjacentHTML("beforeend", recommendationReasons(aiRecommendation));
+  renderCandidateAnalysis(scorecard);
   const evidenceSummary = scorecard.recommendation.question_evidence_summary || {};
   $("question-evidence-summary").innerHTML = `
     <article class="evidence-summary-item"><small>纳入跟踪的问题</small><strong>${evidenceSummary.tracked_total || 0}</strong></article>
@@ -3370,15 +3357,45 @@ function renderScorecard(scorecard) {
   $("scorecard-submit-form").querySelector("button").textContent = scorecard.status === "submitted" ? "更新人工评价" : "提交人工评价";
 }
 
-function recommendationReasons(ai) {
-  return [["支持判断", ai.positive_evidence], ["风险 / 未确认", ai.risks], ["关键未知项", ai.unknowns]]
-    .filter(([, items]) => items?.length).map(([label, items]) => `<div class="recommendation-reasons"><strong>${label}</strong><ul>${items.map(text => `<li>${escapeHtml(text)}</li>`).join("")}</ul></div>`).join("")
-    + '<p class="response-boundary">AI 建议，仅供面试官参考。候选人阶段不会自动改变。</p>';
+function renderCandidateAnalysis(scorecard) {
+  const rec = scorecard.recommendation || {};
+  const ai = rec.ai_recommendation || {};
+  const report = rec.candidate_analysis || {};
+  const failed = report.status === "unavailable" || (!report.status && rec.model_assistance?.status === "degraded");
+  const summary = report.summary || ai.rationale || rec.dialogue_analysis?.summary || rec.summary || "尚未形成分析。";
+  const details = report.details || [];
+  const list = (title, values) => values?.length ? `<section><h4>${title}</h4><ul>${values.map(value => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>` : "";
+  const score = failed || ai.overall_score == null ? "未评分" : `${ai.overall_score} / 5`;
+  const quality = rec.response_quality?.score == null ? "未评分" : `${rec.response_quality.score} / 5`;
+  const labels = { advance: "建议通过本轮", reject: "建议不通过本轮", hold: "保留讨论", supplementary_interview: "建议补充关键验证", insufficient_evidence: "尚无法判断通过与否" };
+  const verdict = failed ? "分析未完成，不是候选人不通过" : labels[ai.decision] || ai.label || "等待分析";
+  const batches = rec.conversation_assessment || {};
+  const guide = report.score_guide || [
+    { range: "0 ≤ 分数 < 1", label: "明显不符合" }, { range: "1 ≤ 分数 < 2", label: "低于岗位要求" },
+    { range: "2 ≤ 分数 < 3", label: "部分符合，需核实关键点" }, { range: "3 ≤ 分数 < 4", label: "基本符合" },
+    { range: "4 ≤ 分数 ≤ 5", label: "较强匹配" },
+  ];
+  const supports = report.strengths || ai.positive_evidence || rec.dialogue_analysis?.observations || [];
+  const risks = report.risks || ai.risks || [];
+  const unknowns = report.unknowns || ai.unknowns || [];
+  $("recommendation").innerHTML = `<div class="ai-recommendation-head"><strong>AI 本轮建议：${escapeHtml(verdict)}</strong></div>
+    <p>${escapeHtml(failed ? "模型尚未完成对话分析。固定问题是否提问不影响评价资格，请恢复模型服务后重新生成。" : summary.slice(0, 300))}</p>
+    ${failed ? `<p class="process-warning">${escapeHtml(report.error_message || "模型请求失败或超时")}。已保存逐字稿；本地规则分数不作为 AI 候选人结论。</p>` : ""}
+    <div class="ai-recommendation-metrics"><span><small>岗位匹配参考分</small>${escapeHtml(score)}</span><span><small>回答质量参考</small>${escapeHtml(quality)}</span><span><small>分析覆盖</small>${batches.total_batches ? `${Number(batches.completed_batches)}/${Number(batches.total_batches)} 批` : "待分析"}</span></div>
+    ${list("主要匹配点", supports.slice(0, 2))}${list("主要风险", risks.slice(0, 2))}
+    <details class="candidate-analysis-details"><summary>展开完整 AI 分析与评分标准</summary>
+      <p>${escapeHtml(summary)}</p>
+      ${list("支持判断的事实", supports)}${list("已经观察到的风险", risks)}${list("尚未确认，不计为负面", unknowns)}
+      ${details.map(item => `<article class="candidate-analysis-part"><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.analysis)}</p>${(item.quotes || []).map(quote => `<blockquote>候选人原话：${escapeHtml(quote.quote)}</blockquote>`).join("")}${list("本段匹配点", item.strengths)}${list("本段风险", item.risks)}${list("本段未知项", item.unknowns)}</article>`).join("")}
+      <h4>0–5 分评分标准</h4><ul>${guide.map(item => `<li><strong>${escapeHtml(item.range)}：${escapeHtml(item.label)}</strong>${item.meaning ? ` — ${escapeHtml(item.meaning)}` : ""}</li>`).join("")}</ul>
+      <p>未问到、证据不足和服务故障不是 0 分；分数是岗位匹配参考，不按分数自动淘汰。未使用左侧参考问题不会扣分或阻止分析。</p>
+    </details><small>置信度 ${failed ? 0 : Math.round((ai.confidence || 0) * 100)}% · AI 建议需人工确认，不自动改变候选人阶段。</small>
+    ${rec.human_decision ? `<p><strong>面试官结论：</strong>${escapeHtml(labels[rec.human_decision.decision] || rec.human_decision.decision)} ${escapeHtml(rec.human_decision.summary_notes || "")}</p>` : ""}`;
 }
 
 function renderSidebarScore(scorecard) {
   const recommendation = scorecard?.recommendation?.ai_recommendation || {};
-  const score = recommendation.overall_score;
+  const score = scorecard?.recommendation?.model_assistance?.status === "degraded" ? null : recommendation.overall_score;
   $("sidebar-evaluation-btn").disabled = false;
   $("sidebar-evaluation-label").textContent = score == null ? "AI 暂不可评" : `AI ${score} / 5`;
   $("sidebar-score-summary").classList.remove("hidden");

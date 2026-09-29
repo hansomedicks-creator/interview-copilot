@@ -455,11 +455,7 @@ class MockIntelligenceProvider:
             "required_questions_asked": required_asked,
             "required_questions_total": len(required_ids),
             "required_question_coverage": round(required_coverage, 2),
-            "process_warning": (
-                "本轮统一必问题未完整覆盖；这是面试过程缺口，不能作为候选人的负面证据。"
-                if required_asked < len(required_ids)
-                else None
-            ),
+            "process_warning": None,  # Prepared questions are optional, not a candidate assessment gate.
         }
         return {
             "rubric_version": "five-level-v0.4",

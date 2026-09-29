@@ -25,6 +25,7 @@ from ..models import (
 from ..services.company_profile import active_company_profile
 from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, is_clarification_response
 from ..services.answer_review_batches import answer_batches, logical_turns, merge_reviews, payload_size, review_payload
+from ..services.candidate_analysis import candidate_report, SCORE_GUIDE
 from ..services.evaluation_scope import round_evaluation_dimensions
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
@@ -500,60 +501,7 @@ class OpenAICompatibleProvider:
             if not dialogue_segments:
                 baseline["model_assistance"] = self._status("ready")
                 return baseline
-            try:
-                self._attach_answer_logic_review(baseline, interview, job, dialogue_segments)
-                judgment = self._assess_free_dialogue(
-                    db, interview, job, dialogue_segments,
-                    response_review=baseline["recommendation"].get("answer_logic_review"),
-                )
-            except IntelligenceProviderError as error:
-                recommendation = baseline["recommendation"]
-                recommendation["decision"] = "insufficient_evidence"
-                recommendation["summary"] = "真实语义模型未完成本轮岗位证据评分；请恢复模型服务后重新生成。"
-                recommendation["ai_recommendation"] = {
-                    "decision": "insufficient_evidence",
-                    "label": "AI 语义评分暂不可用",
-                    "overall_score": None,
-                    "confidence": 0,
-                    "rationale": "为避免把本地关键词和回答长度误当成岗位判断，本次不输出替代分数。",
-                    "human_confirmation_required": True,
-                    "candidate_stage_changed": False,
-                    "planned_question_dependency": False,
-                    "evidence_segment_ids": [],
-                }
-                baseline["model_assistance"] = self._status("degraded", error.code)
-                return baseline
-            if judgment is None:
-                baseline["model_assistance"] = self._status("degraded", "free_dialogue_review_unavailable")
-                return baseline
-            recommendation = baseline["recommendation"]
-            recommendation["decision"] = judgment["decision"]
-            recommendation["summary"] = judgment["rationale"]
-            recommendation["ai_recommendation"] = {
-                "decision": judgment["decision"],
-                "label": judgment["label"],
-                "overall_score": judgment["overall_score"],
-                "confidence": judgment["confidence"],
-                "rationale": judgment["rationale"],
-                "human_confirmation_required": True,
-                "candidate_stage_changed": False,
-                "planned_question_dependency": False,
-                "evidence_segment_ids": judgment["evidence_segment_ids"],
-                "positive_evidence": judgment["positive_evidence"],
-                "risks": judgment["risks"],
-                "unknowns": judgment["unknowns"],
-            }
-            recommendation["dialogue_analysis"]["summary"] = judgment["rationale"]
-            recommendation["dialogue_analysis"]["observations"] = judgment["positive_evidence"]
-            recommendation["dialogue_analysis"]["positive_evidence"] = judgment["positive_evidence"]
-            recommendation["dialogue_analysis"]["risks"] = judgment["risks"]
-            recommendation["conversation_assessment"] = judgment["batch_status"]
-            if judgment["next_round_questions"]:
-                baseline["next_round_questions"] = judgment["next_round_questions"]
-            baseline["model_assistance"] = self._status(
-                "active" if judgment["batch_status"]["failed_batches"] == 0 else "partial"
-            )
-            return baseline
+            return self._finish_candidate_analysis(db, interview, job, dialogue_segments, baseline)
         all_segments = self._segments(db, interview.id, limit=None)
         segments = all_segments
         evidence = [
@@ -664,29 +612,49 @@ class OpenAICompatibleProvider:
                 {item.id for item in evidence},
                 baseline.get("next_round_questions", []),
             )
-            self._attach_answer_logic_review(
-                baseline, interview, job, all_segments
-            )
-            try:
-                judgment = self._assess_free_dialogue(db, interview, job, all_segments,
-                    response_review=baseline["recommendation"].get("answer_logic_review"))
-            except IntelligenceProviderError:
-                judgment = None
-            if judgment:
-                baseline["recommendation"]["ai_recommendation"].update({key: judgment[key] for key in (
-                    "decision", "label", "overall_score", "confidence", "rationale", "positive_evidence", "risks", "unknowns", "evidence_segment_ids")})
-            else:
-                baseline["recommendation"]["ai_recommendation"].update(decision="supplementary_interview",
-                    label="补充验证后再判断", rationale="岗位证据参考已保留，综合语义判断尚未完成；请核实关键未知项。")
-            baseline["model_assistance"] = self._status(
-                "active" if batch_status["failed_batches"] == 0 else "partial"
-            )
-            return baseline
         except IntelligenceProviderError as error:
             baseline["model_assistance"] = self._status(
                 "partial" if assessments else "degraded", error.code
             )
-            return baseline
+        # Optional dimension/summary requests cannot gate the candidate review.
+        baseline["recommendation"]["competency_assessment"] = baseline["recommendation"].get("conversation_assessment")
+        return self._finish_candidate_analysis(db, interview, job, all_segments, baseline)
+
+    def _finish_candidate_analysis(self, db, interview, job, segments, baseline):
+        recommendation = baseline["recommendation"]
+        self._attach_answer_logic_review(baseline, interview, job, segments)
+        error_code = None
+        try:
+            judgment = self._assess_free_dialogue(db, interview, job, segments,
+                response_review=recommendation.get("answer_logic_review"))
+        except IntelligenceProviderError as error:
+            judgment, error_code = None, error.code
+            if getattr(error, "batch_status", None):
+                recommendation["conversation_assessment"] = error.batch_status
+        recommendation["candidate_analysis"] = candidate_report(judgment, error_code=error_code)
+        ai = recommendation.setdefault("ai_recommendation", {})
+        ai.update(human_confirmation_required=True, candidate_stage_changed=False,
+                  planned_question_dependency=False, process_warning=None)
+        if judgment:
+            ai.update({key: judgment[key] for key in ("decision", "label", "overall_score", "confidence", "rationale",
+                       "positive_evidence", "risks", "unknowns", "evidence_segment_ids")})
+            recommendation.update(decision=judgment["decision"], summary=judgment["rationale"],
+                                  conversation_assessment=judgment["batch_status"])
+            recommendation.setdefault("dialogue_analysis", {}).update(summary=judgment["rationale"],
+                observations=judgment["positive_evidence"], positive_evidence=judgment["positive_evidence"], risks=judgment["risks"])
+            baseline["next_round_questions"] = judgment["next_round_questions"]
+            quality = recommendation.get("answer_logic_review", {}).get("status")
+            baseline["model_assistance"] = self._status("active" if judgment["batch_status"]["status"] == "complete" and quality == "model_assessed" else "partial")
+        else:
+            ai.update(decision="insufficient_evidence", label="分析未完成，暂不判断通过与否", overall_score=None,
+                      confidence=0, rationale="模型未完成真实对话分析；不是固定题未问，也不能据此判定候选人不符合。",
+                      positive_evidence=[], risks=[], unknowns=[], evidence_segment_ids=[])
+            recommendation.update(decision="insufficient_evidence", summary=ai["rationale"])
+            for item in baseline.get("ai_scores", []):
+                if item.get("assessment") != "full_conversation_semantic":
+                    item.update(score=None, rationale="语义评价尚未完成，本地规则不替代能力评分。")
+            baseline["model_assistance"] = self._status("degraded", error_code or "free_dialogue_review_unavailable")
+        return baseline
 
     def _attach_answer_logic_review(
         self,
@@ -1004,6 +972,22 @@ class OpenAICompatibleProvider:
         }
 
     def _chat_json(
+        self, *, instructions, payload, schema_name, schema, timeout_seconds=None, max_tokens=None, model=None,
+    ):
+        review_request = schema_name in {"full_conversation_competency_assessment", "interview_scorecard_assistance",
+            "free_dialogue_job_evidence_batch", "candidate_dialogue_summary", "answer_logic_and_consistency_review"}
+        attempts = 2 if review_request else 1
+        for attempt in range(attempts):
+            try:
+                return self._chat_json_once(instructions=instructions, payload=payload, schema_name=schema_name,
+                    schema=schema, timeout_seconds=timeout_seconds, max_tokens=max_tokens, model=model)
+            except IntelligenceProviderError as error:
+                if attempt + 1 == attempts or error.code not in {"timeout", "connection_error", "invalid_response", "output_truncated"}:
+                    raise
+                if error.code == "output_truncated":
+                    max_tokens = min(4000, (max_tokens or 1800) * 2)
+
+    def _chat_json_once(
         self,
         *,
         instructions: str,
@@ -1046,6 +1030,7 @@ class OpenAICompatibleProvider:
             # short, schema-constrained output rather than a long reasoning
             # trace, so non-thinking mode is both faster and less failure-prone.
             request_payload["thinking"] = {"type": "disabled"}
+            request_payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             request_payload["max_tokens"] = max_tokens
         response = self._post(request_payload, timeout_seconds=timeout_seconds)
@@ -1062,6 +1047,8 @@ class OpenAICompatibleProvider:
             raise IntelligenceProviderError("upstream_error", "模型服务暂时不可用")
         try:
             data = response.json()
+            if data["choices"][0].get("finish_reason") == "length":
+                raise IntelligenceProviderError("output_truncated", "模型输出达到长度上限，评价尚未完成")
             content = data["choices"][0]["message"]["content"]
             if isinstance(content, list):
                 content = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
@@ -1092,7 +1079,9 @@ class OpenAICompatibleProvider:
                 json=payload,
                 timeout=timeout_seconds or self.settings.llm_timeout_seconds,
             )
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as error:
+        except httpx.TimeoutException as error:
+            raise IntelligenceProviderError("timeout", "模型响应超时") from error
+        except (httpx.NetworkError, httpx.TransportError) as error:
             raise IntelligenceProviderError("connection_error", "无法连接模型服务") from error
 
     def _segments(
@@ -1217,13 +1206,15 @@ class OpenAICompatibleProvider:
                         "你是自由对话面试的岗位证据评估助手。面试官可以完全不使用固定题；"
                         "你必须理解本批次真实问题为什么被提出，以及候选人的回答是否提供了与 JD 相关、可复核的事实。"
                         "score 是本批次岗位相关证据参考分：1分为出现明确岗位风险，3分为基本证据成立但仍有缺口，"
-                        "5分为在复杂约束下提供了稳定、具体且可核验的成果。没有足够候选人证据时 sufficient_evidence=false。"
+                        "5分为在复杂约束下提供了稳定、具体且可核验的成果。0至1分只用于明确不具备核心要求的真实表现。"
+                        "即便无法评分，也要分析已经谈到的内容，写出具体观察、岗位匹配点、实际差距与未知项；不要只回复证据不足。没有足够候选人证据时 sufficient_evidence=false。"
                         "只能引用 candidate 片段；面试官介绍公司、岗位或福利不能成为候选人的得分证据。"
                         "候选人的嗯、哦、确认词和反问也不能成为岗位证据。回答缺失只能降低置信度，不能被解释成负面能力。"
                         "不得使用性别、年龄、婚育、家庭、籍贯、学校或公司光环评分，不得推断人格、智力或潜力。"
                         "可以建议进入下一轮、补充面试、保留讨论或不建议进入下一轮，但不得自动改变候选人阶段。"
                         "decision 必须综合岗位关键要求、正向事实、真实风险、unknowns、本轮职责、回答相关性和证据置信度；禁止仅按平均分阈值。"
                         "未问到、回答短、ASR不确定、没按核心题问均属于未知，不是负向事实。不建议下一轮时必须在 risk_evidence_segment_ids 引用直接体现岗位风险的原话。"
+                        "rationale 必须说明面试官实际关注什么、候选人如何回答、对岗位履职意味着什么，不得按固定题完成度评价。"
                     ),
                     payload={
                         "candidate_name_reference_only": candidate.display_name if candidate else "",
@@ -1247,7 +1238,7 @@ class OpenAICompatibleProvider:
                     schema_name="free_dialogue_job_evidence_batch",
                     schema=_free_dialogue_batch_schema(),
                     timeout_seconds=max(self.settings.llm_timeout_seconds, 35),
-                    max_tokens=1800,
+                    max_tokens=2400,
                 )
             except IntelligenceProviderError as error:
                 failed += 1
@@ -1261,37 +1252,41 @@ class OpenAICompatibleProvider:
                 )
             )[:8]
             try:
-                score = float(output.get("score"))
+                score = float(output.get("score") or 0) if not output.get("sufficient_evidence") else float(output.get("score"))
                 confidence = float(output.get("confidence", 0))
             except (TypeError, ValueError):
                 failed += 1
                 continue
-            if not output.get("sufficient_evidence") or not referenced or not 1 <= score <= 5:
+            if not referenced or not 0 <= score <= 5:
                 continue
             results.append(
                 {
-                    "score": score,
+                    "score": score if output.get("sufficient_evidence") else None,
                     "confidence": max(0.2, min(0.95, confidence)),
-                    "rationale": str(output.get("rationale", "")).strip()[:500],
+                    "rationale": str(output.get("rationale", "")).strip()[:1000],
                     "positive_evidence": [str(item)[:240] for item in output.get("positive_evidence", []) if str(item).strip()][:4],
                     "risks": [str(item)[:240] for item in output.get("risks", []) if str(item).strip()][:4],
                     "evidence_segment_ids": referenced,
                     "next_round_questions": list(output.get("next_round_questions", []))[:3],
-                    "decision": output.get("decision", "supplementary_interview"),
+                    "decision": output.get("decision", "supplementary_interview") if output.get("sufficient_evidence") else "supplementary_interview",
                     "unknowns": [str(value)[:240] for value in output.get("unknowns", [])],
                     "risk_evidence_segment_ids": [sid for sid in output.get("risk_evidence_segment_ids", []) if sid in batch_candidate_ids],
                 }
             )
         if not results:
             if last_error is not None:
+                last_error.batch_status = {"status": "unavailable", "total_batches": len(batches),
+                    "completed_batches": len(batches) - failed, "failed_batches": failed,
+                    "planned_question_dependency": False}
                 raise last_error
             return None
-        weights = [item["confidence"] * max(1, len(item["evidence_segment_ids"])) for item in results]
+        scored_results = [item for item in results if item["score"] is not None]
+        weights = [item["confidence"] * max(1, len(item["evidence_segment_ids"])) for item in scored_results]
         overall_score = round(
-            sum(item["score"] * weight for item, weight in zip(results, weights, strict=True))
+            sum(item["score"] * weight for item, weight in zip(scored_results, weights, strict=True))
             / max(0.01, sum(weights)),
             1,
-        )
+        ) if scored_results else None
         confidence = round(
             min(
                 0.94,
@@ -1311,12 +1306,12 @@ class OpenAICompatibleProvider:
         unknowns = list(dict.fromkeys(value for item in results for value in item["unknowns"]))
         # Direction comes from contextual judgments, never an average-score cutoff.
         decisions = {item["decision"] for item in results}
-        if failed or confidence < .7 or unknowns or len(decisions) != 1:
+        if failed or confidence < .7 or len(decisions) != 1 or not scored_results or decisions <= {"supplementary_interview", "insufficient_evidence"}:
             decision, label = "supplementary_interview", "补充验证后再判断"
         elif decisions == {"reject"} and all(item["risks"] and item["risk_evidence_segment_ids"] for item in results):
-            decision, label = "reject", "不建议进入下一轮"
+            decision, label = "reject", "建议不通过本轮"
         elif decisions == {"advance"} and all(item["positive_evidence"] and not item["risks"] for item in results):
-            decision, label = "advance", "建议进入下一轮"
+            decision, label = "advance", "建议通过本轮"
         else:
             decision, label = "hold", "暂缓判断"
         positive_evidence = list(
@@ -1349,7 +1344,7 @@ class OpenAICompatibleProvider:
             )
             if len(next_round_questions) >= 5:
                 break
-        return {
+        judgment = {
             "decision": decision,
             "label": label,
             "overall_score": overall_score,
@@ -1360,6 +1355,11 @@ class OpenAICompatibleProvider:
             "unknowns": unknowns,
             "evidence_segment_ids": evidence_segment_ids,
             "next_round_questions": next_round_questions,
+            "analysis_details": [{"title": f"对话分析 {index + 1}", "analysis": item["rationale"],
+                "evidence_segment_ids": item["evidence_segment_ids"],
+                "quotes": quotes_for_segments(item["evidence_segment_ids"], {row.id: row for row in segments}),
+                "strengths": item["positive_evidence"], "risks": item["risks"], "unknowns": item["unknowns"]}
+                for index, item in enumerate(results)],
             "batch_status": {
                 "status": "complete" if failed == 0 else "partial",
                 "total_batches": len(batches),
@@ -1370,6 +1370,48 @@ class OpenAICompatibleProvider:
                 "planned_question_dependency": False,
             },
         }
+        if len(results) > 1:
+            self._synthesize_candidate_summary(job, interview, results, judgment)
+        return judgment
+
+    def _synthesize_candidate_summary(self, job, interview, results, judgment):
+        # A bounded synthesis of already validated batch observations, not a
+        # second unbounded transcript upload. Full batch analysis stays in UI.
+        payload = {"job_title": job.title, "round_type": interview.round_type,
+            "observations": [{key: item[key] for key in ("score", "rationale", "decision", "positive_evidence", "risks", "unknowns", "evidence_segment_ids", "risk_evidence_segment_ids")} for item in results],
+            "score_guide": SCORE_GUIDE, "transcript": []}
+        if payload_size(payload) > self.settings.llm_max_context_chars:
+            judgment["summary_status"] = "batch_details_only"
+            return
+        try:
+            output = self._chat_json(instructions=(
+                "根据已核验的实际面试对话分段观察形成候选人总体分析，不根据是否问固定题判断。"
+                "综合本轮职责与岗位实际需要，区分有能力但缺乏细节、明确不匹配、尚未问到。"
+                "rationale 写成约150至250字的简洁结论，解释做过什么、能否亲自完成核心工作、主要差距与通过倾向。"
+                "给出明确 decision，可建议通过、不通过、保留或补充面试；不得仅用平均分阈值、不得因为任意未知项就一律补充面试。"
+                "分数0至5只评价本轮岗位匹配表现，不能用年龄、性别、婚育、籍贯、学历或雇主名气打分。"
+                "拒绝建议必须引用已输入的真实风险片段ID。原话信息缺失不算风险。"
+                "只使用输入已有的证据ID，不补写事实；使用给定schema输出。"),
+                payload=payload, schema_name="candidate_dialogue_summary", schema=_free_dialogue_batch_schema(),
+                timeout_seconds=max(self.settings.llm_timeout_seconds, 35), max_tokens=2000)
+            refs = set(output.get("evidence_segment_ids") or [])
+            allowed = {sid for item in results for sid in item["evidence_segment_ids"]}
+            risk_allowed = {sid for item in results for sid in item["risk_evidence_segment_ids"]}
+            choice = output.get("decision")
+            if not refs or not refs.issubset(allowed) or choice not in {"advance", "reject", "hold", "supplementary_interview"}:
+                raise IntelligenceProviderError("invalid_response", "总结缺少可核验依据")
+            proposed_risks = set(output.get("risk_evidence_segment_ids") or [])
+            if choice == "reject" and (not output.get("risks") or not proposed_risks or not proposed_risks.issubset(risk_allowed)):
+                raise IntelligenceProviderError("invalid_response", "不通过建议缺少真实风险依据")
+            if not str(output.get("rationale", "")).strip():
+                raise IntelligenceProviderError("invalid_response", "总结缺少分析")
+            judgment["rationale"] = str(output["rationale"])[:1500]
+            if judgment["batch_status"]["failed_batches"] == 0 and judgment["overall_score"] is not None and judgment["confidence"] >= .6:
+                judgment["decision"] = choice
+                judgment["label"] = {"advance": "建议通过本轮", "reject": "建议不通过本轮", "hold": "保留讨论", "supplementary_interview": "建议补充关键验证"}[choice]
+            judgment["summary_status"] = "model_assessed"
+        except IntelligenceProviderError:
+            judgment["summary_status"] = "batch_details_only"
 
     def _apply_conversation_assessments(
         self,
@@ -2396,7 +2438,7 @@ def _free_dialogue_batch_schema() -> dict[str, Any]:
             "unknowns": {"type": "array", "items": {"type": "string"}},
             "risk_evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
             "sufficient_evidence": {"type": "boolean"},
-            "score": {"type": "number", "minimum": 1, "maximum": 5},
+            "score": {"type": "number", "minimum": 0, "maximum": 5},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "rationale": {"type": "string"},
             "positive_evidence": {
