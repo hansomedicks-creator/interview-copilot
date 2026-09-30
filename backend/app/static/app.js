@@ -3364,6 +3364,7 @@ function renderCandidateAnalysis(scorecard) {
   const failed = report.status === "unavailable" || (!report.status && rec.model_assistance?.status === "degraded");
   const summary = report.summary || ai.rationale || rec.dialogue_analysis?.summary || rec.summary || "尚未形成分析。";
   const details = report.details || [];
+  const fitAnalysis = report.job_fit_analysis || [];
   const list = (title, values) => values?.length ? `<section><h4>${title}</h4><ul>${values.map(value => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>` : "";
   const score = failed || ai.overall_score == null ? "未评分" : `${ai.overall_score} / 5`;
   const quality = rec.response_quality?.score == null ? "未评分" : `${rec.response_quality.score} / 5`;
@@ -3382,13 +3383,13 @@ function renderCandidateAnalysis(scorecard) {
     <p>${escapeHtml(failed ? "模型尚未完成对话分析。固定问题是否提问不影响评价资格，请恢复模型服务后重新生成。" : summary.slice(0, 300))}</p>
     ${failed ? `<p class="process-warning">${escapeHtml(report.error_message || "模型请求失败或超时")}。已保存逐字稿；本地规则分数不作为 AI 候选人结论。</p>` : ""}
     <div class="ai-recommendation-metrics"><span><small>岗位匹配参考分</small>${escapeHtml(score)}</span><span><small>回答质量参考</small>${escapeHtml(quality)}</span><span><small>分析覆盖</small>${batches.total_batches ? `${Number(batches.completed_batches)}/${Number(batches.total_batches)} 批` : "待分析"}</span></div>
-    ${list("主要匹配点", supports.slice(0, 2))}${list("主要风险", risks.slice(0, 2))}
-    <details class="candidate-analysis-details"><summary>展开完整 AI 分析与评分标准</summary>
-      <p>${escapeHtml(summary)}</p>
-      ${list("支持判断的事实", supports)}${list("已经观察到的风险", risks)}${list("尚未确认，不计为负面", unknowns)}
-      ${details.map(item => `<article class="candidate-analysis-part"><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.analysis)}</p>${(item.quotes || []).map(quote => `<blockquote>候选人原话：${escapeHtml(quote.quote)}</blockquote>`).join("")}${list("本段匹配点", item.strengths)}${list("本段风险", item.risks)}${list("本段未知项", item.unknowns)}</article>`).join("")}
-      <h4>0–5 分评分标准</h4><ul>${guide.map(item => `<li><strong>${escapeHtml(item.range)}：${escapeHtml(item.label)}</strong>${item.meaning ? ` — ${escapeHtml(item.meaning)}` : ""}</li>`).join("")}</ul>
+    <details class="candidate-analysis-details"><summary>展开岗位匹配分析</summary>
+      ${fitAnalysis.length ? fitAnalysis.map(item => `<article class="candidate-analysis-part"><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.analysis)}</p></article>`).join("") : `<p>${escapeHtml(summary)}</p>${list("与岗位相关的表现", supports)}${list("实际差距", risks)}${list("尚待核实的关键点", unknowns)}<small>当前为已完成的事实分析；重新生成可获取新版岗位匹配综述。</small>`}
+      <details class="candidate-analysis-details"><summary>查看评分标准与判断边界</summary>
+      <h4>0–5 分岗位履职标准</h4><ul>${guide.map(item => `<li><strong>${escapeHtml(item.range)}：${escapeHtml(item.label)}</strong>${item.meaning ? ` — ${escapeHtml(item.meaning)}` : ""}</li>`).join("")}</ul>
       <p>未问到、证据不足和服务故障不是 0 分；分数是岗位匹配参考，不按分数自动淘汰。未使用左侧参考问题不会扣分或阻止分析。</p>
+      </details>
+      ${details.some(item => item.quotes?.length) ? `<details class="candidate-analysis-details"><summary>核对候选人原话</summary>${details.flatMap(item => item.quotes || []).map(quote => `<blockquote>候选人原话：${escapeHtml(quote.quote)}</blockquote>`).join("")}</details>` : ""}
     </details><small>置信度 ${failed ? 0 : Math.round((ai.confidence || 0) * 100)}% · AI 建议需人工确认，不自动改变候选人阶段。</small>
     ${rec.human_decision ? `<p><strong>面试官结论：</strong>${escapeHtml(labels[rec.human_decision.decision] || rec.human_decision.decision)} ${escapeHtml(rec.human_decision.summary_notes || "")}</p>` : ""}`;
 }

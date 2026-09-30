@@ -161,6 +161,7 @@ def test_quality_schema_contains_all_seven_observable_dimensions():
 @pytest.mark.parametrize("score,decision,risks,risk_ids,unknowns,expected", [
     (4.9, "hold", [], [], [], "hold"),
     (4.9, "advance", [], [], ["非核心工具细节尚未提及"], "advance"),
+    (4.0, "advance", ["其他场景尚未核实"], [], [], "advance"),
     (1.2, "reject", ["明确岗位风险"], ["invented-id"], [], "hold"),
     (1.2, "reject", ["候选人明确表示不负责部署"], ["a"], [], "reject"),
     (3.2, "advance", [], [], [], "advance"),

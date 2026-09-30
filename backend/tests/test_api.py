@@ -771,6 +771,7 @@ def test_production_llm_adapter_adds_validated_suggestions_and_rejects_fabricate
                 "evidence_gap": "personal_action",
                 "basis_segment_id": latest["segment_id"],
                 "basis_quote": "根据数据调整执行顺序",
+                "answer_summary": "你会用数据来改变任务优先级",
                 "reason": "候选人提到按数据调整顺序，但决定优先级的判断规则尚不清楚",
                 "question": "当数据和原计划冲突时，你依据哪条规则决定先调整执行顺序？",
                 "priority": "high",
@@ -829,7 +830,8 @@ def test_production_llm_adapter_adds_validated_suggestions_and_rejects_fabricate
         assert analysis["mode"] == "production"
         assert analysis["suggestions"][0]["source"] == "llm_semantic_evidence_gap"
         assert analysis["suggestions"][0]["basis_quote"] == "根据数据调整执行顺序"
-        assert analysis["suggestions"][0]["basis_quote"] in analysis["suggestions"][0]["question"]
+        assert analysis["suggestions"][0]["question"].startswith("我理解你的意思是：你会用数据来改变任务优先级。")
+        assert "根据数据调整执行顺序" not in analysis["suggestions"][0]["question"]
         assert all(item.get("basis_quote") != "模型虚构的候选人原话" for item in analysis["suggestions"])
         assert all(item["quote"] != "这句话并没有出现在逐字稿里" for item in analysis["evidence"])
         assert analysis["model_assistance"]["automatic_decision"] is False

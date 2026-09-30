@@ -52,6 +52,7 @@ def merge_suggestion_history(
                     "reason",
                     "source",
                     "basis_quote",
+                    "answer_summary",
                     "evidence_segment_ids",
                     "source_question_text",
                     "priority",

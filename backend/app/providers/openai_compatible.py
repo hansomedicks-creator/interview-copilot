@@ -25,7 +25,7 @@ from ..models import (
 from ..services.company_profile import active_company_profile
 from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, is_clarification_response
 from ..services.answer_review_batches import answer_batches, logical_turns, merge_reviews, payload_size, review_payload
-from ..services.candidate_analysis import candidate_report, SCORE_GUIDE
+from ..services.candidate_analysis import candidate_report, HIRING_BAR, HIRING_CRITERIA, FIT_TOPICS, validated_fit_analysis
 from ..services.evaluation_scope import round_evaluation_dimensions
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
@@ -198,6 +198,9 @@ class OpenAICompatibleProvider:
                     "如果候选人声称工具已经上线、自动运行或可供他人使用，且该主张影响岗位判断，应优先从权限与数据安全、稳定性、持久化、并发、监控或故障恢复中选择一个最关键的生产化边界当场核实；不要罗列检查清单。"
                     "每条建议必须绑定输入中的 question_id、competency_id 和 candidate 片段，basis_quote 必须逐字复制连续原文。"
                     "追问必须直接承接 basis_quote 的具体含义，不能只根据能力缺口生成一条与回答无关的通用问题。"
+                    "answer_summary用10至45字概括候选人的关键意思，保留是谁做的、范围及不确定性，不逐字摘抄，也不加入原话没有的数字、因果或能力判断。"
+                    "question只写一个紧接该理解的自然口语追问，抓住决定岗位判断的具体疑点，不再重复引言或长篇原话；系统会以‘我理解你的意思是：概括。追问’呈现。"
+                    "概括是待候选人确认的理解，不是引用，不要加引号。basis_quote单独保存原话供核对，不能用概括替换。"
                     "只分析给定逐字稿，不得补充未出现的事实。"
                     "同时检查最近逐字稿中的明显语音识别错误。只有能被相邻上下文、简历或 JD 高置信确认时才能修正；"
                     "修正必须保留原句含义和口语风格，不得总结、润色、补全候选人未说出的内容。没有可靠修正时返回空数组。"
@@ -1131,6 +1134,7 @@ class OpenAICompatibleProvider:
                         "1 分必须来自候选人明确表现出的风险行为或错误判断；未回答、回答短、口头语多、未提及某项内容只能形成 limitations，不能构成低分证据。"
                         "嗯、哦、好的、候选人反问和纯确认信息不得引用为能力证据。优先引用能体现事实、机制、判断依据、责任边界、取舍或修正的片段。"
                         "不得基于姓名、年龄、性别、婚育、学校或公司光环评分，也不得推断人格、智力或潜力。"
+                        + HIRING_CRITERIA + "维度评分仍使用1至5分；只返回给定schema的维度评估，不返回总体报告字段。"
                     ),
                     payload={
                         "job_title": job.title,
@@ -1205,8 +1209,7 @@ class OpenAICompatibleProvider:
                     instructions=(
                         "你是自由对话面试的岗位证据评估助手。面试官可以完全不使用固定题；"
                         "你必须理解本批次真实问题为什么被提出，以及候选人的回答是否提供了与 JD 相关、可复核的事实。"
-                        "score 是本批次岗位相关证据参考分：1分为出现明确岗位风险，3分为基本证据成立但仍有缺口，"
-                        "5分为在复杂约束下提供了稳定、具体且可核验的成果。0至1分只用于明确不具备核心要求的真实表现。"
+                        + HIRING_BAR +
                         "即便无法评分，也要分析已经谈到的内容，写出具体观察、岗位匹配点、实际差距与未知项；不要只回复证据不足。没有足够候选人证据时 sufficient_evidence=false。"
                         "只能引用 candidate 片段；面试官介绍公司、岗位或福利不能成为候选人的得分证据。"
                         "候选人的嗯、哦、确认词和反问也不能成为岗位证据。回答缺失只能降低置信度，不能被解释成负面能力。"
@@ -1259,18 +1262,25 @@ class OpenAICompatibleProvider:
                 continue
             if not referenced or not 0 <= score <= 5:
                 continue
+            risk_refs = [sid for sid in output.get("risk_evidence_segment_ids", []) if sid in batch_candidate_ids]
+            proposed_risks = [str(item)[:240] for item in output.get("risks", []) if str(item).strip()][:4]
+            # Unverified concerns are unknowns, not observed negative performance.
+            unknowns = [str(value)[:240] for value in output.get("unknowns", [])]
+            if not risk_refs:
+                unknowns.extend(proposed_risks)
             results.append(
                 {
                     "score": score if output.get("sufficient_evidence") else None,
                     "confidence": max(0.2, min(0.95, confidence)),
                     "rationale": str(output.get("rationale", "")).strip()[:1000],
                     "positive_evidence": [str(item)[:240] for item in output.get("positive_evidence", []) if str(item).strip()][:4],
-                    "risks": [str(item)[:240] for item in output.get("risks", []) if str(item).strip()][:4],
+                    "risks": proposed_risks if risk_refs else [],
                     "evidence_segment_ids": referenced,
                     "next_round_questions": list(output.get("next_round_questions", []))[:3],
                     "decision": output.get("decision", "supplementary_interview") if output.get("sufficient_evidence") else "supplementary_interview",
-                    "unknowns": [str(value)[:240] for value in output.get("unknowns", [])],
-                    "risk_evidence_segment_ids": [sid for sid in output.get("risk_evidence_segment_ids", []) if sid in batch_candidate_ids],
+                    "unknowns": list(dict.fromkeys(unknowns)),
+                    "risk_evidence_segment_ids": risk_refs,
+                    "job_fit_analysis": validated_fit_analysis(output.get("job_fit_analysis"), batch_candidate_ids),
                 }
             )
         if not results:
@@ -1372,14 +1382,17 @@ class OpenAICompatibleProvider:
         }
         if len(results) > 1:
             self._synthesize_candidate_summary(job, interview, results, judgment)
+        else:
+            judgment["job_fit_analysis"] = results[0]["job_fit_analysis"]
+            judgment["summary_status"] = "model_assessed" if results[0]["job_fit_analysis"] else "observations_only"
         return judgment
 
     def _synthesize_candidate_summary(self, job, interview, results, judgment):
         # A bounded synthesis of already validated batch observations, not a
-        # second unbounded transcript upload. Full batch analysis stays in UI.
-        payload = {"job_title": job.title, "round_type": interview.round_type,
+        # second unbounded transcript upload. Raw evidence remains available for audit.
+        payload = {"job_title": job.title, "jd_reference": (job.jd_text or "")[:2600], "round_type": interview.round_type,
             "observations": [{key: item[key] for key in ("score", "rationale", "decision", "positive_evidence", "risks", "unknowns", "evidence_segment_ids", "risk_evidence_segment_ids")} for item in results],
-            "score_guide": SCORE_GUIDE, "transcript": []}
+            "transcript": []}
         if payload_size(payload) > self.settings.llm_max_context_chars:
             judgment["summary_status"] = "batch_details_only"
             return
@@ -1391,9 +1404,9 @@ class OpenAICompatibleProvider:
                 "给出明确 decision，可建议通过、不通过、保留或补充面试；不得仅用平均分阈值、不得因为任意未知项就一律补充面试。"
                 "分数0至5只评价本轮岗位匹配表现，不能用年龄、性别、婚育、籍贯、学历或雇主名气打分。"
                 "拒绝建议必须引用已输入的真实风险片段ID。原话信息缺失不算风险。"
-                "只使用输入已有的证据ID，不补写事实；使用给定schema输出。"),
+                "只使用输入已有的证据ID，不补写事实；简历背景只作参考，不能替代面试表现。" + HIRING_BAR),
                 payload=payload, schema_name="candidate_dialogue_summary", schema=_free_dialogue_batch_schema(),
-                timeout_seconds=max(self.settings.llm_timeout_seconds, 35), max_tokens=2000)
+                timeout_seconds=max(self.settings.llm_timeout_seconds, 35), max_tokens=3000)
             refs = set(output.get("evidence_segment_ids") or [])
             allowed = {sid for item in results for sid in item["evidence_segment_ids"]}
             risk_allowed = {sid for item in results for sid in item["risk_evidence_segment_ids"]}
@@ -1405,11 +1418,20 @@ class OpenAICompatibleProvider:
                 raise IntelligenceProviderError("invalid_response", "不通过建议缺少真实风险依据")
             if not str(output.get("rationale", "")).strip():
                 raise IntelligenceProviderError("invalid_response", "总结缺少分析")
+            try:
+                synthesized_score = float(output.get("score")) if output.get("sufficient_evidence") else None
+            except (TypeError, ValueError):
+                raise IntelligenceProviderError("invalid_response", "总体评分无效")
+            if synthesized_score is not None and not 0 <= synthesized_score <= 5:
+                raise IntelligenceProviderError("invalid_response", "总体评分越界")
             judgment["rationale"] = str(output["rationale"])[:1500]
+            judgment["job_fit_analysis"] = validated_fit_analysis(output.get("job_fit_analysis"), allowed)
             if judgment["batch_status"]["failed_batches"] == 0 and judgment["overall_score"] is not None and judgment["confidence"] >= .6:
-                judgment["decision"] = choice
-                judgment["label"] = {"advance": "建议通过本轮", "reject": "建议不通过本轮", "hold": "保留讨论", "supplementary_interview": "建议补充关键验证"}[choice]
-            judgment["summary_status"] = "model_assessed"
+                # Overall job fit is a synthesis, not a mean of fragmented answers.
+                judgment["overall_score"] = round(synthesized_score, 1) if synthesized_score is not None else None
+                judgment["decision"] = choice if synthesized_score is not None else "supplementary_interview"
+                judgment["label"] = {"advance": "建议通过本轮", "reject": "建议不通过本轮", "hold": "保留讨论", "supplementary_interview": "建议补充关键验证"}[judgment["decision"]]
+            judgment["summary_status"] = "model_assessed" if judgment["job_fit_analysis"] else "observations_only"
         except IntelligenceProviderError:
             judgment["summary_status"] = "batch_details_only"
 
@@ -1779,6 +1801,10 @@ class OpenAICompatibleProvider:
             question = str(item.get("question", "")).strip()
             reason = str(item.get("reason", "")).strip()
             source_segment = candidate_segments.get(basis_segment_id)
+            answer_summary = str(item.get("answer_summary", "")).strip()
+            # Keep paraphrase distinct from provenance; never force raw quotes into the question.
+            if len(answer_summary) > 80 or any(term in answer_summary for term in FORBIDDEN_DECISION_TERMS):
+                answer_summary = ""
             quote_is_traceable = bool(
                 source_segment
                 and (
@@ -1813,11 +1839,8 @@ class OpenAICompatibleProvider:
                 continue
             output.append(
                 {
-                    "question": (
-                        question[:300]
-                        if evidence_quote in question
-                        else f"你刚才提到“{evidence_quote[:72]}”。{question}"[:300]
-                    ),
+                    "question": (f"我理解你的意思是：{answer_summary.rstrip('。；，')}。{question}" if answer_summary else question)[:300],
+                    "answer_summary": answer_summary,
                     "reason": reason[:200],
                     "priority": item.get("priority") if item.get("priority") in {"high", "normal", "low"} else "normal",
                     "source": "llm_semantic_evidence_gap",
@@ -2152,6 +2175,7 @@ def _live_schema() -> dict[str, Any]:
                         },
                         "basis_segment_id": {"type": "string"},
                         "basis_quote": {"type": "string"},
+                        "answer_summary": {"type": "string", "maxLength": 80},
                         "reason": {"type": "string"},
                         "question": {"type": "string"},
                         "priority": {"type": "string", "enum": ["high", "normal", "low"]},
@@ -2162,6 +2186,7 @@ def _live_schema() -> dict[str, Any]:
                         "evidence_gap",
                         "basis_segment_id",
                         "basis_quote",
+                        "answer_summary",
                         "reason",
                         "question",
                         "priority",
@@ -2434,6 +2459,12 @@ def _free_dialogue_batch_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "job_fit_analysis": {"type": "array", "maxItems": 4, "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"topic": {"type": "string", "enum": list(FIT_TOPICS)},
+                    "analysis": {"type": "string"},
+                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}}},
+                "required": ["topic", "analysis", "evidence_segment_ids"]}},
             "decision": {"type": "string", "enum": ["advance", "supplementary_interview", "hold", "reject", "insufficient_evidence"]},
             "unknowns": {"type": "array", "items": {"type": "string"}},
             "risk_evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
@@ -2473,6 +2504,7 @@ def _free_dialogue_batch_schema() -> dict[str, Any]:
             },
         },
         "required": [
+            "job_fit_analysis",
             "decision", "unknowns", "risk_evidence_segment_ids",
             "sufficient_evidence",
             "score",
