@@ -57,6 +57,26 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class JobAssessmentVersion(Base):
+    __tablename__ = "job_assessment_versions"
+    __table_args__ = (UniqueConstraint("job_id", "version", name="uq_job_assessment_version"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    criteria: Mapped[list] = mapped_column(JSON, default=list)
+    recommendations: Mapped[list] = mapped_column(JSON, default=list)
+    manually_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[dict] = mapped_column(JSON, default=dict)
+    recommendation_status: Mapped[str] = mapped_column(String(32), default="manual_required")
+    updated_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __mapper_args__ = {"version_id_col": revision}
+
+
 class Application(Base):
     __tablename__ = "applications"
 

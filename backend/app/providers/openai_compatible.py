@@ -27,6 +27,8 @@ from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, 
 from ..services.answer_review_batches import answer_batches, logical_turns, merge_reviews, payload_size, review_payload
 from ..services.candidate_analysis import candidate_report, HIRING_BAR, HIRING_CRITERIA, FIT_TOPICS, validated_fit_analysis
 from ..services.evaluation_scope import round_evaluation_dimensions
+from ..services.job_assessment import SNAPSHOT_KEY, compact_rubric, source_for_interview
+from ..schemas import AssessmentCriterion
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
     job_semantic_schema,
@@ -188,6 +190,7 @@ class OpenAICompatibleProvider:
                     + ("当前是自由对话分析模式：只跟随面试官实际提出的问题，不得匹配、评分或补造任何能力维度。" if conversation_mode else "")
                     + "只有追问能显著改变面试官对候选人的认知时才返回一条建议；没有高价值追问时必须返回空数组。"
                     "优先寻找回答内部矛盾、关键机制、本人判断与团队方案的边界、取舍依据、失败原因、认知上限，以及岗位本质与候选人经历之间的落差。"
+                    "若当前回答同时存在多个值得核实的缺口，参考confirmed_weight和critical确定优先级；权重不得用于强行切换话题或追问尚未提及的能力。"
                     "‘结果、数字、本人行动’不是每道题都必须补齐。职业规划、兴趣爱好、寒暄、确认信息、候选人反问等回答，禁止套用项目结果或量化指标追问。"
                     "嗯、哦、好的、然后呢等口头语或确认词不是回答、不是证据，也不得作为 basis_quote。"
                     "先识别实际问题意图：动机看选择依据和持续行为，技术看机制与排查路径，亲力亲为看责任边界和操作细节，判断力看备选方案与取舍；只有成果主张或 KPI 相关问题才核实结果或指标。"
@@ -348,6 +351,28 @@ class OpenAICompatibleProvider:
             }
             return fallback
 
+    def recommend_job_assessment(self, source: dict) -> list[dict]:
+        payload = {k: source[k] for k in ("title", "jd_text", "supplementary_requirements")}
+        if payload_size(payload) > self.settings.llm_max_context_chars:
+            raise ValueError("JD exceeds recommendation context; manual review required")
+        output = self._chat_json(
+            instructions=(
+                "根据岗位 JD 与补充要求，推荐 4–8 项互不重复、能观察实际工作行为的考核标准。"
+                "先理解岗位要解决的问题、本人交付责任、复杂度和失败代价，再分配整数权重，总和必须100。"
+                "不要固定平均分配；reason解释为何该项对这个岗位重要、为何给予这个权重。"
+                "每项source_excerpt必须逐字引用JD或补充要求中的一段连续原文。不得臆造职责或指标。"
+                "definition说明要验证什么；score_anchors给1、3、5分各自的具体表现，3分应能独立完成常规工作。"
+                "未问到只能未知，不是1分。critical仅用于岗位明确不可缺少的工作能力。"
+                "round_types按本项内容选择business、hr、ceo或custom，可多选；不要为凑三轮创造能力。"
+                "排除年龄、性别、婚育、健康、外貌、籍贯、学校光环、运动爱好等非岗位能力因素。"
+                "id使用简短英文或数字连字符。推荐只是草稿，须HR确认，不能自动录用或淘汰。"
+            ), payload=payload, schema_name="job_assessment_recommendations",
+            schema={"type": "object", "properties": {"criteria": {"type": "array", "items": AssessmentCriterion.model_json_schema()}},
+                    "required": ["criteria"], "additionalProperties": False},
+            model=self._planning_model(), max_tokens=4200, timeout_seconds=max(self.settings.llm_timeout_seconds, 45),
+        )
+        return output.get("criteria", [])
+
     def refine_interview_plan(
         self,
         db: Session,
@@ -364,7 +389,7 @@ class OpenAICompatibleProvider:
         resume_reference = _clean_resume_reference(candidate.resume_text)[:7600]
         dimensions = [
             item
-            for item in (job.semantic_profile or {}).get("interview_dimensions", [])
+            for item in plan.get("preparation_context", {}).get("jd_interview_dimensions", (job.semantic_profile or {}).get("interview_dimensions", []))
             if item.get("round_type") == interview.round_type
         ]
         dimension_payload = [
@@ -373,6 +398,8 @@ class OpenAICompatibleProvider:
                 "name": str(item.get("name", "")),
                 "job_context": str(item.get("job_context") or item.get("source_excerpt") or "")[:360],
                 "evidence_target": str(item.get("evidence_target", ""))[:240],
+                "confirmed_weight": item.get("weight"),
+                "critical": item.get("critical", False),
             }
             for item in dimensions
         ]
@@ -384,6 +411,7 @@ class OpenAICompatibleProvider:
                     "问题要区分‘会复述概念’与‘真正理解并做过关键判断’，优先追问设计选择、机制、失败原因、取舍、认知边界或经历与岗位之间的关键落差。"
                     "对于管培生和应届生，不假设成熟工作经验；可以深入课程、个人项目、比赛或实习，但问题仍需检验其是否能把技术用于真实问题。"
                     "每道题只问一个核心问题，使用自然口语，候选人听一遍就能明白。"
+                    "存在confirmed_weight时，优先选高权重或关键项对应的简历经历，深入其工作判断；不为覆盖率硬凑题。所有问题只是建议。"
                     "禁止使用‘你实际负责哪一部分’‘最后有什么结果’‘为什么愿意投入’‘讲一个具体案例’等通用模板，禁止机械要求 STAR、数字或结果。"
                     "resume_quote 必须逐字复制简历中的一段连续原文；无法找到高价值切入点时返回空数组，不能硬凑问题。"
                 ),
@@ -391,7 +419,8 @@ class OpenAICompatibleProvider:
                     "candidate_stage": plan.get("preparation_context", {}).get("candidate_stage"),
                     "job_title": job.title,
                     "round_type": interview.round_type,
-                    "jd": job.jd_text[:3800],
+                    "jd": ((plan.get(SNAPSHOT_KEY) or {}).get("source") or source_for_interview(interview, job))["jd_text"][:3800],
+                    "supplementary_requirements": ((plan.get(SNAPSHOT_KEY) or {}).get("source") or source_for_interview(interview, job)).get("supplementary_requirements", ""),
                     "resume": resume_reference,
                     "round_dimensions": dimension_payload,
                 },
@@ -499,7 +528,7 @@ class OpenAICompatibleProvider:
 
     def draft_scorecard(self, db: Session, interview: InterviewRound, job: Job) -> dict[str, Any]:
         baseline = self.fallback.draft_scorecard(db, interview, job)
-        if interview.interview_mode == "conversation":
+        if interview.interview_mode == "conversation" and not (interview.plan_payload or {}).get(SNAPSHOT_KEY):
             dialogue_segments = self._segments(db, interview.id, limit=None)
             if not dialogue_segments:
                 baseline["model_assistance"] = self._status("ready")
@@ -527,6 +556,9 @@ class OpenAICompatibleProvider:
             return baseline
 
         competencies = round_evaluation_dimensions(db, interview, job)
+        if not baseline.get("ai_scores") and (interview.plan_payload or {}).get(SNAPSHOT_KEY):
+            baseline["ai_scores"] = [{"competency_id": c["id"], "competency_name": c["name"], "score": None,
+                                      "evidence_ids": [], "confirmed_evidence_ids": []} for c in competencies]
         assessments, batch_status = self._assess_full_conversation(
             interview,
             job,
@@ -977,6 +1009,12 @@ class OpenAICompatibleProvider:
     def _chat_json(
         self, *, instructions, payload, schema_name, schema, timeout_seconds=None, max_tokens=None, model=None,
     ):
+        has_rubric = bool(payload.get("confirmed_job_criteria")) or any(
+            c.get("confirmed_weight") is not None for c in payload.get("competencies", [])
+        )
+        if has_rubric and payload_size(payload) > self.settings.llm_max_context_chars:
+            # Never silently trim transcript evidence to accommodate custom rubric text.
+            raise IntelligenceProviderError("context_overflow", "岗位标准与对话超出上下文预算，请精简标准或调整预算")
         review_request = schema_name in {"full_conversation_competency_assessment", "interview_scorecard_assistance",
             "free_dialogue_job_evidence_batch", "candidate_dialogue_summary", "answer_logic_and_consistency_review"}
         attempts = 2 if review_request else 1
@@ -1114,11 +1152,12 @@ class OpenAICompatibleProvider:
         competencies: list[dict[str, Any]],
         segments: list[TranscriptSegment],
     ) -> tuple[list[dict[str, Any]], dict[str, int | str]]:
+        rubric_size = payload_size({"competencies": [_live_competency_payload(c) for c in competencies]})
         batches = _conversation_batches(
             segments,
             max_chars=max(
                 2400,
-                min(7600, self.settings.llm_max_context_chars - 3800),
+                min(7600, self.settings.llm_max_context_chars - max(3800, rubric_size + 1000)),
             ),
         )
         assessments: list[dict[str, Any]] = []
@@ -1186,7 +1225,8 @@ class OpenAICompatibleProvider:
         candidate = db.get(Candidate, application.candidate_id) if application else None
         batches = _conversation_batches(
             segments,
-            max_chars=max(2600, min(5200, self.settings.llm_max_context_chars - 5200)),
+            max_chars=max(1200, min(5200, self.settings.llm_max_context_chars - 5200 - payload_size(compact_rubric(interview))
+                                   - len(source_for_interview(interview, job).get("supplementary_requirements", "")[:2000]))),
         )
         results: list[dict[str, Any]] = []
         failed = 0
@@ -1209,6 +1249,7 @@ class OpenAICompatibleProvider:
                     instructions=(
                         "你是自由对话面试的岗位证据评估助手。面试官可以完全不使用固定题；"
                         "你必须理解本批次真实问题为什么被提出，以及候选人的回答是否提供了与 JD 相关、可复核的事实。"
+                        "如提供confirmed_job_criteria，应按已确认的职责定义与权重分析岗位匹配主次，核心能力不能被无关优点掩盖；不要自行改权重。"
                         + HIRING_BAR +
                         "即便无法评分，也要分析已经谈到的内容，写出具体观察、岗位匹配点、实际差距与未知项；不要只回复证据不足。没有足够候选人证据时 sufficient_evidence=false。"
                         "只能引用 candidate 片段；面试官介绍公司、岗位或福利不能成为候选人的得分证据。"
@@ -1223,7 +1264,9 @@ class OpenAICompatibleProvider:
                         "candidate_name_reference_only": candidate.display_name if candidate else "",
                         "resume_reference": candidate.resume_text[:1800] if candidate else "",
                         "job_title": job.title,
-                        "jd_reference": job.jd_text[:2600],
+                        "jd_reference": source_for_interview(interview, job)["jd_text"][:2600],
+                        "confirmed_job_criteria": compact_rubric(interview),
+                        "supplementary_requirements": source_for_interview(interview, job).get("supplementary_requirements", "")[:2000],
                         "configured_round_type": interview.round_type,
                         "answer_quality_review": ({key: response_review.get(key) for key in
                             ("status", "logic_score", "confidence", "summary")} if response_review else None),
@@ -1390,7 +1433,8 @@ class OpenAICompatibleProvider:
     def _synthesize_candidate_summary(self, job, interview, results, judgment):
         # A bounded synthesis of already validated batch observations, not a
         # second unbounded transcript upload. Raw evidence remains available for audit.
-        payload = {"job_title": job.title, "jd_reference": (job.jd_text or "")[:2600], "round_type": interview.round_type,
+        payload = {"job_title": job.title, "jd_reference": source_for_interview(interview, job)["jd_text"][:2600], "round_type": interview.round_type,
+            "confirmed_job_criteria": compact_rubric(interview),
             "observations": [{key: item[key] for key in ("score", "rationale", "decision", "positive_evidence", "risks", "unknowns", "evidence_segment_ids", "risk_evidence_segment_ids")} for item in results],
             "transcript": []}
         if payload_size(payload) > self.settings.llm_max_context_chars:
@@ -1952,6 +1996,8 @@ def _live_competency_payload(item: dict[str, Any]) -> dict[str, Any]:
         "suggested_follow_up": item.get("follow_up", ""),
         "keywords_navigation_only": list(item.get("keywords", [])),
         "source": item.get("source", "round_catalog"),
+        "confirmed_weight": item.get("weight"),
+        "critical": item.get("critical", False),
     }
 
 

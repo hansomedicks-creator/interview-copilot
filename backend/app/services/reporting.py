@@ -161,7 +161,8 @@ def render_report_html(report: InterviewReportVersion, audience: str) -> str:
         f"<article class='round'><header><b>{escape(str(item.get('round_label', '面试')))}</b>"
         f"<span>{escape(str(item.get('human_decision_label') or '待提交人工评价'))}</span></header>"
         f"<p>面试官：{escape('、'.join(item.get('interviewer_names') or []) or '待分配')}</p>"
-        f"<p>{escape(str(item.get('human_notes') or '暂无评价说明'))}</p></article>"
+        f"<p>{escape(str(item.get('human_notes') or '暂无评价说明'))}</p>"
+        f"{_weighted_report_html(item.get('weighted_assessment'))}</article>"
         for item in rounds
     ) or "<p class='muted'>暂无面试轮次。</p>"
     evidence_html = "".join(
@@ -270,6 +271,7 @@ def _build_snapshot(db: Session, review: dict[str, Any]) -> dict[str, Any]:
             "human_decision_label": DECISION_LABELS.get(human_decision.get("decision")),
             "human_notes": human_decision.get("summary_notes"),
             "final_scores": scorecard.get("final_scores") or [],
+            "weighted_assessment": scorecard.get("weighted_assessment"),
         })
 
     strengths = [
@@ -403,3 +405,15 @@ def _html_list(items: list[str], empty_text: str) -> str:
     if not items:
         return f"<p class='muted'>{escape(empty_text)}</p>"
     return "<ul>" + "".join(f"<li>{escape(str(item))}</li>" for item in items) + "</ul>"
+
+
+def _weighted_report_html(weighted: dict | None) -> str:
+    if not weighted:
+        return ""
+    score = f"{weighted['score']} / 5" if weighted.get("score") is not None else "尚未评分"
+    rows = "".join(f"<li>{escape(str(c['name']))}（{c['weight']}%）："
+                   f"{c['score'] if c.get('score') is not None else '未知'}；{escape(str(c.get('rationale', '')))}</li>"
+                   for c in weighted.get("rows", []))
+    return (f"<h4>AI 加权参考 · 标准 v{int(weighted['version'])}</h4><p>{escape(score)}；"
+            f"已核实 {int(weighted['observed_weight'])} / 本轮 {int(weighted['round_weight'])} 权重。</p>"
+            f"<ul>{rows}</ul><p>{escape(str(weighted.get('policy', '')))}</p>")

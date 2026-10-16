@@ -652,6 +652,8 @@ function selectJob(jobId) {
   $("job-code-input").value = job.source_job_code || "";
   $("job-status-input").value = jobRecruitmentStatus(job);
   $("job-jd-input").value = job.jd_text || "";
+  $("job-requirements-input").value = job.supplementary_requirements || "";
+  jobAssessmentEditor.mount(job.id, job.assessment);
   const profileBadge = $("job-editor-profile-state");
   profileBadge.className = `pill ${job.profile?.state === "active" ? "ready" : "warning"}`;
   profileBadge.textContent = job.profile?.state === "active" ? `${job.profile.active_version} 已生效` : job.profile?.draft_version ? `${job.profile.draft_version} 草稿` : "尚未生成画像";
@@ -685,6 +687,7 @@ function renderJobSemanticSummary(profile = {}) {
 }
 
 function startNewJob() {
+  jobAssessmentEditor.mount(null);
   state.currentJobId = null;
   $("job-editor-empty").classList.add("hidden");
   const form = $("job-editor-form");
@@ -733,22 +736,23 @@ async function saveJobDefinition(event) {
   event.preventDefault();
   const title = $("job-title-input").value.trim();
   const jdText = $("job-jd-input").value.trim();
+  const savingJobId = state.currentJobId;
+  const jobPayload = {title, jd_text: jdText, source_job_code: $("job-code-input").value.trim() || null,
+    status: $("job-status-input").value, supplementary_requirements: $("job-requirements-input").value.trim()};
   if (jdText.length < 20) return toast("请补充完整 JD，至少需要 20 个字符", true);
   const button = $("job-save-btn");
   button.disabled = true;
   const originalLabel = button.textContent;
   button.textContent = "正在理解完整 JD 并生成分轮问题…";
   try {
-    const path = state.currentJobId ? `/api/v1/admin/jobs/${state.currentJobId}` : "/api/v1/admin/jobs";
+    const path = savingJobId ? `/api/v1/admin/jobs/${savingJobId}` : "/api/v1/admin/jobs";
+    if (jobAssessmentEditor.isBusy(savingJobId)) throw new Error("考核标准正在保存，请稍候");
+    await jobAssessmentEditor.saveIfDirty(savingJobId);
     const result = await api(path, {
-      method: state.currentJobId ? "PUT" : "POST",
-      body: JSON.stringify({
-        title,
-        source_job_code: $("job-code-input").value.trim() || null,
-        status: $("job-status-input").value,
-        jd_text: jdText,
-      }),
+      method: savingJobId ? "PUT" : "POST",
+      body: JSON.stringify(jobPayload),
     });
+    if (state.currentJobId !== savingJobId) { toast(`${title} 已保存，请重新打开岗位查看推荐`); return; }
     state.currentJobId = result.job.id;
     const refreshText = result.refreshed_interviews ? `，并刷新 ${result.refreshed_interviews} 场尚未开始的面试` : "";
     const frozenText = result.frozen_in_progress ? `；${result.frozen_in_progress} 场进行中面试保持原标准` : "";
@@ -2547,6 +2551,7 @@ async function loadInterview() {
   const currentAgenda = state.todayInterviews.find((item) => item.interview_id === state.interviewId);
   $("system-route").textContent = roundLabel(data.routing?.round_type || data.interview.round_type);
   $("route-reason").textContent = `调用题库：${data.routing?.question_bank_version || data.interview.plan_payload.question_bank_version || "默认题库"} · 岗位模型 ${data.routing?.competency_model_version || data.job.competency_model_version}`;
+  if (data.interview.plan_payload.job_assessment_snapshot) $("route-reason").textContent += ` · 已冻结考核标准 v${data.interview.plan_payload.job_assessment_snapshot.version}`;
   renderPreparationBrief(data.interview.plan_payload);
   renderRoundTabs();
   await refreshQuestionProgress();
@@ -3383,7 +3388,9 @@ function renderCandidateAnalysis(scorecard) {
     <p>${escapeHtml(failed ? "模型尚未完成对话分析。固定问题是否提问不影响评价资格，请恢复模型服务后重新生成。" : summary.slice(0, 300))}</p>
     ${failed ? `<p class="process-warning">${escapeHtml(report.error_message || "模型请求失败或超时")}。已保存逐字稿；本地规则分数不作为 AI 候选人结论。</p>` : ""}
     <div class="ai-recommendation-metrics"><span><small>岗位匹配参考分</small>${escapeHtml(score)}</span><span><small>回答质量参考</small>${escapeHtml(quality)}</span><span><small>分析覆盖</small>${batches.total_batches ? `${Number(batches.completed_batches)}/${Number(batches.total_batches)} 批` : "待分析"}</span></div>
+    ${rec.weighted_assessment ? `<p class="helper">按已确认岗位标准 v${Number(rec.weighted_assessment.version)} 加权 · 已核实 ${Number(rec.weighted_assessment.observed_weight)} / 本轮 ${Number(rec.weighted_assessment.round_weight)} 权重${rec.weighted_assessment.provisional ? "；当前分数仅代表已核实项，不代表整体达标。" : "。"}</p>` : ""}
     <details class="candidate-analysis-details"><summary>展开岗位匹配分析</summary>
+      ${renderWeightedAssessment(rec.weighted_assessment)}
       ${fitAnalysis.length ? fitAnalysis.map(item => `<article class="candidate-analysis-part"><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.analysis)}</p></article>`).join("") : `<p>${escapeHtml(summary)}</p>${list("与岗位相关的表现", supports)}${list("实际差距", risks)}${list("尚待核实的关键点", unknowns)}<small>当前为已完成的事实分析；重新生成可获取新版岗位匹配综述。</small>`}
       <details class="candidate-analysis-details"><summary>查看评分标准与判断边界</summary>
       <h4>0–5 分岗位履职标准</h4><ul>${guide.map(item => `<li><strong>${escapeHtml(item.range)}：${escapeHtml(item.label)}</strong>${item.meaning ? ` — ${escapeHtml(item.meaning)}` : ""}</li>`).join("")}</ul>
@@ -3392,6 +3399,14 @@ function renderCandidateAnalysis(scorecard) {
       ${details.some(item => item.quotes?.length) ? `<details class="candidate-analysis-details"><summary>核对候选人原话</summary>${details.flatMap(item => item.quotes || []).map(quote => `<blockquote>候选人原话：${escapeHtml(quote.quote)}</blockquote>`).join("")}</details>` : ""}
     </details><small>置信度 ${failed ? 0 : Math.round((ai.confidence || 0) * 100)}% · AI 建议需人工确认，不自动改变候选人阶段。</small>
     ${rec.human_decision ? `<p><strong>面试官结论：</strong>${escapeHtml(labels[rec.human_decision.decision] || rec.human_decision.decision)} ${escapeHtml(rec.human_decision.summary_notes || "")}</p>` : ""}`;
+}
+
+function renderWeightedAssessment(weighted) {
+  if (!weighted) return "";
+  return `<section class="weighted-assessment"><h4>岗位考核标准 v${Number(weighted.version)}</h4>
+    <p>${weighted.score == null ? "尚无可加权的语义评分" : `已核实项加权参考分 ${Number(weighted.score)} / 5${weighted.provisional ? "（暂定，不是整体达标）" : ""}`} · 已核实 ${Number(weighted.observed_weight)} / 本轮 ${Number(weighted.round_weight)} 权重，岗位总权重 100。</p>
+    <div class="assessment-table-wrap"><table><thead><tr><th>考核项</th><th>岗位权重</th><th>本轮评分</th><th>判断依据</th></tr></thead><tbody>${weighted.rows.map(c=>`<tr><td>${escapeHtml(c.name)}${c.critical ? " · 核心" : ""}</td><td>${Number(c.weight)}%</td><td>${c.score == null ? "未知" : Number(c.score) + " / 5"}</td><td>${escapeHtml(c.rationale)}</td></tr>`).join("")}</tbody></table></div>
+    <p>${escapeHtml(weighted.policy)}</p><details><summary>查看本岗位逐项评分标准</summary>${weighted.rows.map(c=>`<h5>${escapeHtml(c.name)}</h5><ul>${[1,3,5].map(n=>`<li>${n} 分：${escapeHtml(c.score_anchors[String(n)])}</li>`).join("")}</ul>`).join("")}</details></section>`;
 }
 
 function renderSidebarScore(scorecard) {

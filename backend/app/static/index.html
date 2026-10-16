@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.2.3-job-fit-analysis" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.3.1-weighted-assessment" />
   </head>
   <body>
     <header class="topbar">
@@ -189,6 +189,7 @@
                   <button id="job-jd-file-btn" class="secondary" type="button">选择文件</button><input id="job-jd-file" class="visually-hidden" type="file" accept=".pdf,.docx,.txt,.md" />
                 </div>
                 <label class="job-jd-label">岗位 JD<textarea id="job-jd-input" rows="16" required minlength="20" placeholder="请粘贴岗位职责、任职要求、关键目标和协作关系，或从上方文件自动提取"></textarea></label>
+                <label>补充用人要求（可选）<textarea id="job-requirements-input" rows="3" maxlength="5000" placeholder="例如：需要本人动手解决生产异常，不是只负责带团队；入职后首先需要解决什么问题？"></textarea></label>
                 <div class="jd-quality-row"><span id="job-jd-count">0 个字符</span><span>建议至少包含：岗位职责、任职要求、关键目标、汇报或协作关系</span></div>
                 <section id="job-semantic-summary" class="job-semantic-summary hidden" aria-live="polite">
                   <div class="job-semantic-heading"><div><span class="kicker">JD UNDERSTANDING</span><h4>系统对岗位的理解</h4></div><span id="job-semantic-mode" class="pill warning">待分析</span></div>
@@ -198,11 +199,12 @@
                 </section>
                 <div class="knowledge-boundary"><strong>生成逻辑</strong><span>保存后，系统会先理解完整 JD 的岗位使命、业务结果和真实场景，再按业务面 / HR 面 / CEO 面生成证据型问题；不会把某个关键词直接当作能力，也不会自动改变录用标准。</span></div>
                 <div class="job-editor-actions">
-                  <button id="job-save-btn" class="primary" type="submit">保存 JD、理解岗位并生成画像草稿</button>
+                  <button id="job-save-btn" class="primary" type="submit">保存 JD 并推荐考核标准</button>
                   <button id="job-open-profile-btn" class="secondary" type="button" disabled>查看画像草稿</button>
                   <button id="job-import-candidates-btn" class="secondary" type="button" disabled>为该岗位导入候选人</button>
                 </div>
               </form>
+              <section id="job-assessment-editor" class="job-assessment-editor hidden" aria-label="岗位考核项与权重"></section>
             </section>
           </div>
         </section>
@@ -687,6 +689,7 @@
       </div>
     </dialog>
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=1.2.3-job-fit-analysis" defer></script>
+    <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
+    <script src="/static/app.js?v=1.3.1-weighted-assessment" defer></script>
   </body>
 </html>

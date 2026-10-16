@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 
 class ORMModel(BaseModel):
@@ -57,6 +57,7 @@ class AdminJobSave(BaseModel):
     jd_text: str = Field(min_length=20, max_length=100_000)
     source_job_code: str | None = Field(default=None, max_length=128)
     status: Literal["active", "paused", "closed"] = "active"
+    supplementary_requirements: str = Field(default="", max_length=5000)
 
     @model_validator(mode="after")
     def clean_job_definition(self) -> "AdminJobSave":
@@ -66,6 +67,47 @@ class AdminJobSave(BaseModel):
         if len(self.jd_text) < 20:
             raise ValueError("job description must contain at least 20 characters")
         return self
+
+
+class AssessmentCriterion(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    name: str = Field(min_length=2, max_length=80)
+    definition: str = Field(min_length=5, max_length=600)
+    weight: StrictInt = Field(ge=1, le=100)
+    critical: bool = False
+    round_types: list[Literal["business", "hr", "ceo", "custom"]] = Field(min_length=1, max_length=4)
+    reason: str = Field(default="人工新增", max_length=600)
+    source_excerpt: str = Field(default="", max_length=800)
+    score_anchors: dict[str, str]
+
+    @model_validator(mode="after")
+    def validate_anchors(self) -> "AssessmentCriterion":
+        if set(self.score_anchors) != {"1", "3", "5"} or any(
+            not isinstance(v, str) or not 5 <= len(v.strip()) <= 600
+            for v in self.score_anchors.values()
+        ):
+            raise ValueError("请填写 1、3、5 分的具体行为标准（每项 5–600 字）；未问到不等于 1 分")
+        self.round_types = list(dict.fromkeys(self.round_types))
+        return self
+
+
+class AssessmentDraftSave(BaseModel):
+    version_id: str
+    revision: int = Field(ge=1)
+    criteria: list[AssessmentCriterion] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def unique_ids(self) -> "AssessmentDraftSave":
+        if len({item.id for item in self.criteria}) != len(self.criteria):
+            raise ValueError("考核项 ID 不能重复")
+        return self
+
+
+class AssessmentActivation(BaseModel):
+    version_id: str
+    revision: int = Field(ge=1)
+    confirmed: Literal[True]
 
 
 class ApplicationCreate(BaseModel):

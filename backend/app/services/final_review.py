@@ -100,7 +100,7 @@ def build_final_review(db: Session, application: Application) -> dict[str, Any]:
                         interview.round_type, interview.round_type
                     ),
                     "interviewer_names": list(interview.interviewer_names or []),
-                    "score": round(
+                    "score": recommendation["weighted_assessment"]["score"] if recommendation.get("weighted_assessment") else round(
                         sum(float(item["score"]) for item in assessed_ai_scores)
                         / len(assessed_ai_scores),
                         1,
@@ -116,6 +116,7 @@ def build_final_review(db: Session, application: Application) -> dict[str, Any]:
                     ),
                     "transcript_count": transcript_count,
                     "evaluation_scope": scope,
+                    "weighted_assessment": recommendation.get("weighted_assessment"),
                     "assessment_basis": (
                         recommendation.get("ai_recommendation", {})
                     ).get("assessment_basis", "available_round_evidence"),
@@ -182,6 +183,7 @@ def build_final_review(db: Session, application: Application) -> dict[str, Any]:
                 "jd_assessments": (scorecard.recommendation or {}).get("jd_assessments", []),
                 "evaluation_scope": (scorecard.recommendation or {}).get("evaluation_scope", {}),
                 "ai_recommendation": (scorecard.recommendation or {}).get("ai_recommendation", {}),
+                "weighted_assessment": (scorecard.recommendation or {}).get("weighted_assessment"),
                 "answer_logic_review": (scorecard.recommendation or {}).get("answer_logic_review", {}),
                 "final_scores": final_scores,
                 "next_round_questions": scorecard.next_round_questions,

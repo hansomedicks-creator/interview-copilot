@@ -23,6 +23,8 @@ from pydantic import ValidationError
 from pypdf import PdfReader
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.exc import IntegrityError
 
 from .config import Settings
 from .audio import AudioFrameBridge, AudioRecordingSession, InvalidAudioChunk, pipecat_available
@@ -43,6 +45,7 @@ from .models import (
     InterviewQuestionProgress,
     InterviewRound,
     Job,
+    JobAssessmentVersion,
     KnowledgePublication,
     KnowledgeProposal,
     ResumeImportBatch,
@@ -59,6 +62,8 @@ from .providers import create_intelligence_provider
 from .providers.feishu_notifications import FeishuNotificationSender
 from .schemas import (
     AdminJobSave,
+    AssessmentDraftSave,
+    AssessmentActivation,
     ApplicationCreate,
     ApplicationFinalDecision,
     ApplicationRead,
@@ -101,6 +106,7 @@ from .schemas import (
 )
 from .services.planning import build_plan, prior_round_context
 from .services.job_semantics import build_local_job_semantic_profile
+from .services import job_assessment
 from .services.action_center import (
     application_is_active,
     build_hr_action_center,
@@ -654,6 +660,8 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         )
         db.add(job)
         db.flush()
+        job.semantic_profile = {**job.semantic_profile, "supplementary_requirements": payload.supplementary_requirements.strip()}
+        job_assessment.refresh_recommendations(db, job, request.app.state.intelligence, user["display_name"])
         draft, changed = build_or_refresh_profile_draft(
             db,
             job=job,
@@ -719,6 +727,8 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 **job.semantic_profile,
                 "interview_flow": previous_flow,
             }
+        job.semantic_profile = {**job.semantic_profile, "supplementary_requirements": payload.supplementary_requirements.strip()}
+        job_assessment.refresh_recommendations(db, job, request.app.state.intelligence, user["display_name"])
         db.flush()
         draft, changed = build_or_refresh_profile_draft(
             db,
@@ -758,6 +768,66 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             "refreshed_interviews": refreshed_interviews,
             "frozen_in_progress": frozen_in_progress,
         }
+
+    @app.post("/api/v1/admin/jobs/{job_id}/assessment/recommend")
+    def recommend_job_assessment(job_id: str, request: Request, db: Session = Depends(get_db)):
+        user = _require_role(request, "hr", "admin")
+        job = db.get(Job, job_id)
+        if not job or job.status == "demo":
+            raise HTTPException(404, "job not found")
+        try:
+            job_assessment.refresh_recommendations(db, job, request.app.state.intelligence, user["display_name"])
+            record_audit_event(db, user, action="job.assessment_recommended", resource_type="job", resource_id=job.id, details={})
+            db.commit()
+        except (StaleDataError, IntegrityError):
+            db.rollback()
+            raise HTTPException(409, "考核标准已被其他人修改，请刷新后重试")
+        return job_assessment.assessment_payload(db, job)
+
+    @app.put("/api/v1/admin/jobs/{job_id}/assessment")
+    def save_job_assessment(job_id: str, payload: AssessmentDraftSave, request: Request, db: Session = Depends(get_db)):
+        user = _require_role(request, "hr", "admin")
+        job = db.get(Job, job_id)
+        version = db.get(JobAssessmentVersion, payload.version_id)
+        if not job or not version or version.job_id != job_id:
+            raise HTTPException(404, "assessment not found")
+        if version.revision != payload.revision or version.status not in {"active", "draft"}:
+            raise HTTPException(409, "考核标准已变化，请刷新后再编辑")
+        if version.status == "active" and any(v.status == "draft" for v in job_assessment.versions(db, job_id)):
+            raise HTTPException(409, "已有新草稿，请刷新后编辑草稿")
+        try:
+            draft = job_assessment.ensure_draft(db, job, user["display_name"])
+            draft.criteria = [c.model_dump() for c in payload.criteria]
+            draft.manually_edited = True
+            draft.updated_by = user["display_name"]
+            record_audit_event(db, user, action="job.assessment_saved", resource_type="job", resource_id=job.id,
+                               details={"version": draft.version, "total_weight": sum(c.weight for c in payload.criteria)})
+            db.commit()
+        except (StaleDataError, IntegrityError):
+            db.rollback()
+            raise HTTPException(409, "考核标准已被其他人修改，请刷新后重试")
+        return job_assessment.assessment_payload(db, job)
+
+    @app.post("/api/v1/admin/jobs/{job_id}/assessment/activate")
+    def activate_job_assessment(job_id: str, payload: AssessmentActivation, request: Request, db: Session = Depends(get_db)):
+        user = _require_role(request, "hr", "admin")
+        job = db.get(Job, job_id)
+        draft = db.get(JobAssessmentVersion, payload.version_id)
+        if not job or not draft or draft.job_id != job_id:
+            raise HTTPException(404, "assessment not found")
+        if draft.revision != payload.revision:
+            raise HTTPException(409, "草稿已变化，请刷新并重新确认")
+        try:
+            job_assessment.activate(db, job, draft, user["display_name"])
+            record_audit_event(db, user, action="job.assessment_activated", resource_type="job", resource_id=job.id,
+                               details={"version": draft.version, "criteria_count": len(draft.criteria)})
+            db.commit()
+        except ValueError as error:
+            raise HTTPException(422, str(error))
+        except (StaleDataError, IntegrityError):
+            db.rollback()
+            raise HTTPException(409, "考核标准已被其他人修改，请刷新后重试")
+        return job_assessment.assessment_payload(db, job)
 
     @app.patch("/api/v1/admin/jobs/{job_id}/status")
     def update_admin_job_status(
@@ -1420,7 +1490,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             application = Application(
                 id=new_id("app"), candidate_id=candidate.id, job_id=job.id,
                 current_stage=_stage_for_round(payload.rounds[0].round_type),
-                screening_payload=payload.screening_payload,
+                screening_payload={key: value for key, value in payload.screening_payload.items() if key != job_assessment.SNAPSHOT_KEY},
             )
             db.add_all([candidate, application])
         db.flush()
@@ -2006,7 +2076,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             candidate_id=payload.candidate_id,
             job_id=payload.job_id,
             current_stage=payload.current_stage,
-            screening_payload=payload.screening_payload,
+            screening_payload={key: value for key, value in payload.screening_payload.items() if key != job_assessment.SNAPSHOT_KEY},
         )
         db.add(application)
         db.commit()
@@ -3886,6 +3956,8 @@ def _admin_job_payload(db: Session, job: Job) -> dict[str, Any]:
         "title": job.title,
         "source_job_code": job.source_job_code,
         "jd_text": job.jd_text,
+        "supplementary_requirements": (job.semantic_profile or {}).get("supplementary_requirements", ""),
+        "assessment": job_assessment.assessment_payload(db, job),
         "jd_character_count": len(job.jd_text or ""),
         "status": job.status,
         "recruitment_status": _job_recruitment_status(job.status),
@@ -4085,6 +4157,7 @@ def _upsert_scorecard_draft(
     job: Job,
 ) -> Scorecard:
     draft = intelligence.draft_scorecard(db, interview, job)
+    job_assessment.apply_weighted_assessment(interview, draft)
     _assert_scores_have_evidence(draft["ai_scores"])
     scorecard = db.scalar(
         select(Scorecard).where(Scorecard.interview_round_id == interview.id)

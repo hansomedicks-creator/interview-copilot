@@ -1771,3 +1771,23 @@ body.role-admin .task-header > div > .kicker { display: none; }
   .task-actions-popover { right: 0; }
   .task-delete-dialog-card { padding: 22px 18px; }
 }
+/* Job-owned assessment drafts, independent of the JD form and live interview. */
+.job-assessment-editor { border-top: 1px solid #e5e1ef; padding: 24px; margin-top: 20px; }
+.assessment-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.assessment-toolbar, .assessment-footer, .assessment-rounds { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+.assessment-criterion { border: 1px solid #e5e1ef; border-radius: 10px; background: #fff; padding: 18px; margin: 14px 0; }
+.assessment-heading { display: grid; grid-template-columns: minmax(0, 1fr) 100px auto; gap: 12px; align-items: end; }
+.assessment-criterion label { display: grid; gap: 6px; margin-bottom: 12px; font-size: 15px; }
+.assessment-criterion input:not([type=checkbox]), .assessment-criterion textarea { width: 100%; min-width: 0; box-sizing: border-box; font: inherit; font-size: 16px; padding: 10px 12px; border: 1px solid #dcd7e7; border-radius: 8px; background: #fff; color: #282236; }
+.assessment-criterion input:focus-visible, .assessment-criterion textarea:focus-visible { outline: 2px solid #6c4cf1; outline-offset: 1px; }
+.assessment-rounds label { display: flex; align-items: center; gap: 6px; margin: 0; }
+.assessment-rounds input[type=checkbox] { width: auto; }
+.assessment-criterion summary, .job-assessment-editor details > summary { cursor: pointer; padding: 10px 0; }
+.assessment-criterion blockquote { margin: 10px 0; border-left: 3px solid #d9cffd; padding-left: 12px; }
+.assessment-footer { border-top: 1px solid #e5e1ef; padding-top: 16px; }
+.assessment-footer [data-save-state] { flex: 1; color: #686277; }
+.assessment-preview { padding: 16px; border-radius: 10px; background: #f5f2ff; }
+.assessment-table-wrap { overflow-x: auto; }
+.weighted-assessment { padding: 12px 0; }
+.weighted-assessment th, .weighted-assessment td { padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e5e1ef; }
+@media (max-width: 700px) { .job-assessment-editor { padding: 14px; } .assessment-heading { grid-template-columns: minmax(0, 1fr) 80px; } }

@@ -11,6 +11,7 @@ from .catalog import competencies_for
 from .company_profile import company_required_questions
 from .job_semantics import build_local_job_semantic_profile
 from .resume_recognition import recognize_resume
+from .job_assessment import SNAPSHOT_KEY, freeze_for_interview, rubric_dimensions
 
 
 def preparation_context(db: Session, interview: InterviewRound) -> dict[str, Any]:
@@ -36,6 +37,11 @@ def preparation_context(db: Session, interview: InterviewRound) -> dict[str, Any
     if job and not semantic_profile:
         semantic_profile = build_local_job_semantic_profile(job.title, job.jd_text)
     dimensions = list(semantic_profile.get("interview_dimensions", []))
+    snapshot = freeze_for_interview(db, interview)
+    if snapshot:
+        dimensions = [{**c, "id": c["id"].removeprefix("jd_semantic."), "round_type": interview.round_type,
+                       "evidence_target": c["definition"]}
+                      for c in rubric_dimensions(snapshot, interview.round_type)]
     focus_terms = [
         str(item.get("name"))
         for item in dimensions
@@ -43,6 +49,7 @@ def preparation_context(db: Session, interview: InterviewRound) -> dict[str, Any
     ]
     return {
         "candidate_facts": facts,
+        SNAPSHOT_KEY: snapshot,
         "job_focus_terms": focus_terms,
         "personalization_status": "ready" if facts or focus_terms else "limited",
         "boundary": "仅用于生成核实性问题，不代表候选人已具备或不具备相关能力",
@@ -200,6 +207,7 @@ def build_plan(
     questions = [*company_questions, *standard_questions, *personalized, *carryover]
     return {
         "version": "plan-v1.1",
+        SNAPSHOT_KEY: context.get(SNAPSHOT_KEY),
         "interview_mode": interview.interview_mode,
         "mode_label": "智能混合面试" if interview.interview_mode == "structured" else "旧版自由对话",
         "question_bank_version": f"{interview.round_type}-standard-v0.1",

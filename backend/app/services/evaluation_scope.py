@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..models import InterviewRound, Job
 from .company_profile import effective_competencies
 from .job_semantics import build_local_job_semantic_profile
+from .job_assessment import SNAPSHOT_KEY, rubric_dimensions
 
 
 ROUND_LABELS = {
@@ -23,6 +24,9 @@ def round_evaluation_dimensions(
     job: Job,
 ) -> list[dict[str, Any]]:
     """Combine role-specific competencies with this round's JD evidence dimensions."""
+    snapshot = (interview.plan_payload or {}).get(SNAPSHOT_KEY)
+    if snapshot:
+        return rubric_dimensions(snapshot, interview.round_type)
     dimensions = [
         {**item, "evaluation_source": item.get("source", "round_competency")}
         for item in effective_competencies(db, interview.round_type, job.competencies)
