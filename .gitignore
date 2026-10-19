@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+*.key
+*.pem
+*.cms
 
 # Python environments and caches
 .venv/

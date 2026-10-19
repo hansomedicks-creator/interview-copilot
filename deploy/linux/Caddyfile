@@ -4,6 +4,12 @@
 }
 
 interview-copilot.ink {
+	# Pin the reviewed issuer: do not silently accept another CA's agreement.
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+		}
+	}
 	request_body {
 		max_size 25MB
 	}
