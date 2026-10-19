@@ -7,6 +7,7 @@ umask 077
 SOURCE=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 VERSION=2.11.7
 SHA256=727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b
+BINARY_SHA256=678ade3bfc088749c81a681adc603333ee0bb023b6a6cfe3c0f58bef8ff854e9
 DEST=/opt/interview-copilot/tools/caddy/$VERSION
 install -d -m 0755 "$DEST"
 if [[ ! -f $DEST/caddy ]]; then
@@ -17,6 +18,7 @@ if [[ ! -f $DEST/caddy ]]; then
     tar -xzf "$DEST/release.tar.gz" -C "$DEST" caddy
     chmod 0755 "$DEST/caddy"
 fi
+printf '%s  %s\n' "$BINARY_SHA256" "$DEST/caddy" | sha256sum -c -
 "$DEST/caddy" version
 if ! id interview-proxy >/dev/null 2>&1; then
     useradd --system --home-dir /var/lib/interview-proxy --shell /sbin/nologin interview-proxy
@@ -33,6 +35,9 @@ fi
 # Validate full public config without starting it or issuing a certificate.
 runuser -u interview-proxy -- env HOME=/var/lib/interview-proxy XDG_DATA_HOME=/var/lib/interview-proxy/data \
     "$DEST/caddy" validate --config /etc/interview-copilot-proxy/Caddyfile
+if ss -H -lnt 'sport = :18080' | grep -q .; then
+    echo 'Test port 18080 is occupied; refuse to interfere with another listener'; exit 1
+fi
 CHECK=$(mktemp -d /var/tmp/interview-caddy-check.XXXXXX)
 printf '{\n admin off\n auto_https off\n}\nhttp://127.0.0.1:18080 {\n reverse_proxy 127.0.0.1:8000\n}\n' > "$CHECK/Caddyfile"
 "$DEST/caddy" run --config "$CHECK/Caddyfile" > "$CHECK/proxy.log" 2>&1 &

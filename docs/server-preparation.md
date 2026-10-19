@@ -74,6 +74,8 @@ bash deploy/linux/prepare-caddy.sh
 
 脚本从 Caddy 官方 GitHub 下载固定的 2.11.7 Linux amd64 资产，校验固定 SHA-256 摘要，使用独立的无登录账号与配置目录。暂存的 `interview-copilot-proxy.service` 保持未启用，运行完整配置 validate，并用临时本机 HTTP 代理验证健康和生产认证，然后关闭该临时进程。不请求正式证书、不开放端口、不修改宝塔设置。SHA-256 来源是官方 GitHub release API；这是下载完整性校验，不等同于已验证发行签名。
 
+如服务器直连发布包超时，可以在受控电脑下载同一个官方归档、核对上述摘要后传入，或从同一个官方 URL 分段下载并检查范围 / 完整摘要。解包到脚本规定的固定版本目录后再次运行脚本；脚本也会验证已缓存二进制的固定摘要。不得关闭 TLS 校验或将未经核对的第三方文件直接作为缓存二进制。
+
 选用 Caddy 后不再启用 Nginx 模板。正式启动 Caddy 会监听 80/443 并尝试为域名申请证书，必须在域名、飞书、模型、ASR 与证书申请事项就绪后单独操作。Caddy 使用自身的证书存储和自动续期机制；证书续期和实际 WSS 音频仍需上线验收。其默认不会开启请求访问日志，避免记录 OAuth 回调查询参数。保留的宝塔面板不负责管理这个入口。
 
 1. 通过受控 SSH / 服务器本地方式填写飞书、DeepSeek 和腾讯云密钥，核对实际模型名称与可用权限。不要把真实密钥粘贴到自动化助手命令中，因为云端会保存命令内容。
@@ -86,3 +88,5 @@ bash deploy/linux/prepare-caddy.sh
 参考：[OpenCloudOS PostgreSQL 指南](https://docs.opencloudos.org/en/OCS/Typical_Application_Deployment/PostgreSQL_guide/)、[PostgreSQL 资源参数](https://www.postgresql.org/docs/15/runtime-config-resource.html)、[Nginx WebSocket 代理](https://nginx.org/en/docs/http/websocket.html)。
 
 Caddy 参考：[官方安装说明](https://caddyserver.com/docs/install)、[配置验证命令](https://caddyserver.com/docs/command-line#caddy-validate)、[反向代理与 WebSocket](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)。
+
+本次实际执行记录：[2026-10-19 服务器准备验收](server-preparation-verification-2026-10-19.md)。
