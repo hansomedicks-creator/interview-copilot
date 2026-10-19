@@ -64,11 +64,25 @@ python3 /opt/interview-copilot/current/deploy/linux/manage.py verify-backup
 
 ## 正式开放前剩余配置
 
+### 宝塔镜像的代理准备
+
+部分宝塔镜像的 DNF 配置排除了 `nginx` 软件包。不要修改这项过滤规则或同时安装两套 Nginx。本仓库另提供独立 Caddy 入口准备：
+
+```bash
+bash deploy/linux/prepare-caddy.sh
+```
+
+脚本从 Caddy 官方 GitHub 下载固定的 2.11.7 Linux amd64 资产，校验固定 SHA-256 摘要，使用独立的无登录账号与配置目录。暂存的 `interview-copilot-proxy.service` 保持未启用，运行完整配置 validate，并用临时本机 HTTP 代理验证健康和生产认证，然后关闭该临时进程。不请求正式证书、不开放端口、不修改宝塔设置。SHA-256 来源是官方 GitHub release API；这是下载完整性校验，不等同于已验证发行签名。
+
+选用 Caddy 后不再启用 Nginx 模板。正式启动 Caddy 会监听 80/443 并尝试为域名申请证书，必须在域名、飞书、模型、ASR 与证书申请事项就绪后单独操作。Caddy 使用自身的证书存储和自动续期机制；证书续期和实际 WSS 音频仍需上线验收。其默认不会开启请求访问日志，避免记录 OAuth 回调查询参数。保留的宝塔面板不负责管理这个入口。
+
 1. 通过受控 SSH / 服务器本地方式填写飞书、DeepSeek 和腾讯云密钥，核对实际模型名称与可用权限。不要把真实密钥粘贴到自动化助手命令中，因为云端会保存命令内容。
 2. 设置管理员和 HR open_id，并在飞书应用中配置正式回调 URI、入口和可用范围。
 3. 确认本地数据与 Obsidian 内容是否迁移。迁移前使用 SQLite backup API 产生一致备份，不直接拷贝仍在写入的 db/WAL；迁移路径与录音相对引用需验证。
-4. 域名 A 记录指向目标 IP，完成证书申请与自动续期；使用宝塔管理的 Nginx 或系统 Nginx 中的一套，检查模板中的证书路径、WebSocket Upgrade 与 3600 秒空闲超时。云入口只按需要开放 80/443；数据库与 8000 不直接公开。
+4. 域名 A 记录指向目标 IP，完成证书申请与自动续期；选择 Caddy 或一套 Nginx 入口。Nginx 需检查证书路径、WebSocket Upgrade 与 3600 秒空闲超时；Caddy 原生支持 WebSocket 转发。云入口只按需要开放 80/443；数据库与 8000 不直接公开。
 5. 展示真实 ICP 备案号并核对服务信息，然后使用合成样本完成 HTTPS / 飞书 / 麦克风 / 腾讯云流式识别 / 模型 / 报告测试。
 6. 实测峰值内存、连续面试、服务重启、跨浏览器权限和备份恢复。真实候选人数据上线前仍需完成告知、权限、加密存储及保留期操作。
 
 参考：[OpenCloudOS PostgreSQL 指南](https://docs.opencloudos.org/en/OCS/Typical_Application_Deployment/PostgreSQL_guide/)、[PostgreSQL 资源参数](https://www.postgresql.org/docs/15/runtime-config-resource.html)、[Nginx WebSocket 代理](https://nginx.org/en/docs/http/websocket.html)。
+
+Caddy 参考：[官方安装说明](https://caddyserver.com/docs/install)、[配置验证命令](https://caddyserver.com/docs/command-line#caddy-validate)、[反向代理与 WebSocket](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)。

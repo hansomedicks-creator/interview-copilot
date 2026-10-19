@@ -1,0 +1,13 @@
+# Staged only: enable the proxy service after DNS, real credentials and TLS review.
+{
+	admin off
+}
+
+interview-copilot.ink {
+	request_body {
+		max_size 25MB
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
+}

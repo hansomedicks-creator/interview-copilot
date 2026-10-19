@@ -1,0 +1,2 @@
+# Linux deployment files must remain usable after a Windows checkout / upload.
+deploy/linux/** text eol=lf
