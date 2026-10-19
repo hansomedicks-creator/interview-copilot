@@ -1,0 +1,39 @@
+[Unit]
+Description=Interview Copilot (single-process pilot)
+After=network-online.target postgresql.service
+Requires=postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=interview-copilot
+Group=interview-copilot
+WorkingDirectory=/opt/interview-copilot/current/backend
+EnvironmentFile=/etc/interview-copilot/production.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMBA_NUM_THREADS=1 XDG_CACHE_HOME=/var/cache/interview-copilot
+ExecStart=/opt/interview-copilot/current/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --ws-max-size 1048576 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillSignal=SIGINT
+UMask=0077
+StateDirectory=interview-copilot
+CacheDirectory=interview-copilot
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/interview-copilot /var/cache/interview-copilot
+MemoryAccounting=true
+MemoryHigh=300M
+MemoryMax=420M
+MemorySwapMax=256M
+TasksMax=128
+LimitNOFILE=4096
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

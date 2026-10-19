@@ -1,0 +1,35 @@
+# Staged template only. Install AFTER obtaining a valid certificate.
+# Baota: use a dedicated site, retaining the panel's existing global config.
+# Do not install a second Nginx alongside a panel-managed Nginx.
+server {
+    listen 80;
+    server_name interview-copilot.ink;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/interview-copilot-acme;
+    }
+    location / { return 301 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name interview-copilot.ink;
+    ssl_certificate /etc/interview-copilot/tls/fullchain.pem;
+    ssl_certificate_key /etc/interview-copilot/tls/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 25m;
+    # Avoid logging OAuth authorization codes / state from query strings.
+    access_log off;
+    error_log /var/log/nginx/interview-copilot.error.log warn;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+}

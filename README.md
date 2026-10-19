@@ -34,6 +34,8 @@ AI 面试伴侣的首个可运行纵向切片。它面向人工面试官，不�
 
 ## 本地启动
 
+OpenCloudOS 9 单机部署准备（含 1GB 试点约束、生产配置、systemd、备份与回滚边界）见 [服务器准备说明](docs/server-preparation.md)。准备脚本仅启动本机监听服务，正式域名、HTTPS、密钥和数据迁移仍需完成验收。
+
 要求 Python 3.11+。
 
 Windows 可以直接双击项目根目录的 `start-interview-copilot.cmd`，它会启动服务并打开网页。启动后的命令窗口需要保持开启。

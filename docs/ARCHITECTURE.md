@@ -165,6 +165,8 @@ OpenAI 兼容 Provider 支持实时分析模型和面试前规划模型分别配
 
 ### 正式生产仍需补齐
 
+`deploy/linux/` 另提供 OpenCloudOS 9 的原生单进程应用 + 本机 PostgreSQL 准备方案，包含生产环境文件、systemd 和本地备份。该准备方案只监听 loopback，不自动启用域名/HTTPS、迁移业务数据或完成真实 Provider 验收，详见 `docs/server-preparation.md`。
+
 - HTTPS 与正式域名；
 - 受控的 PostgreSQL 实例和数据库迁移机制；
 - 加密对象存储或受控持久卷；

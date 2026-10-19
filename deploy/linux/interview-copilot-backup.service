@@ -1,0 +1,17 @@
+[Unit]
+Description=Interview Copilot local incremental backup
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/interview-copilot/current/deploy/linux/manage.py backup
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=1800
+MemoryMax=160M
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/interview-copilot
