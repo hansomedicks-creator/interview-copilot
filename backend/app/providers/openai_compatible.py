@@ -27,7 +27,8 @@ from ..services.answer_logic import ANSWER_LOGIC_BOUNDARY, quotes_for_segments, 
 from ..services.answer_review_batches import answer_batches, logical_turns, merge_reviews, payload_size, review_payload
 from ..services.candidate_analysis import candidate_report, HIRING_BAR, HIRING_CRITERIA, FIT_TOPICS, validated_fit_analysis
 from ..services.evaluation_scope import round_evaluation_dimensions
-from ..services.job_assessment import SNAPSHOT_KEY, compact_rubric, source_for_interview
+from ..services.job_assessment import SNAPSHOT_KEY, compact_rubric, source_for_interview, work_context
+from ..services.preparation_questions import QUESTION_INSTRUCTIONS, validated_preparation_questions
 from ..schemas import AssessmentCriterion
 from ..services.job_semantics import (
     build_local_job_semantic_profile,
@@ -37,6 +38,7 @@ from ..services.job_semantics import (
 from ..services.utterance_quality import (
     best_substantive_quote,
     describes_absence_instead_of_behavior,
+    separate_evidence_rationale,
     is_evidence_worthy_utterance,
     is_substantive_utterance,
     is_usable_evidence_record,
@@ -386,7 +388,7 @@ class OpenAICompatibleProvider:
         if not candidate or candidate.source == "demo" or interview.interview_mode == "conversation":
             return self._replace_resume_plan_questions(plan, [], status="not_applicable")
 
-        resume_reference = _clean_resume_reference(candidate.resume_text)[:7600]
+        resume_reference = _clean_resume_reference(candidate.resume_text)
         dimensions = [
             item
             for item in plan.get("preparation_context", {}).get("jd_interview_dimensions", (job.semantic_profile or {}).get("interview_dimensions", []))
@@ -398,36 +400,29 @@ class OpenAICompatibleProvider:
                 "name": str(item.get("name", "")),
                 "job_context": str(item.get("job_context") or item.get("source_excerpt") or "")[:360],
                 "evidence_target": str(item.get("evidence_target", ""))[:240],
+                "definition": str(item.get("definition") or item.get("description") or ""),
                 "confirmed_weight": item.get("weight"),
                 "critical": item.get("critical", False),
             }
             for item in dimensions
         ]
+        source = source_for_interview(interview, job)
+        question_payload = {
+            "candidate_stage": plan.get("preparation_context", {}).get("candidate_stage"),
+            "job_title": job.title, "round_type": interview.round_type,
+            "jd": source["jd_text"], "supplementary_requirements": source.get("supplementary_requirements", ""),
+            "resume": resume_reference, "round_dimensions": dimension_payload,
+        }
+        if payload_size(question_payload) > self.settings.llm_max_context_chars:
+            return self._replace_resume_plan_questions(plan, [], status="degraded", error_code="context_overflow")
         try:
             output = self._chat_json(
-                instructions=(
-                    "你是资深招聘负责人和岗位专家。请同时理解完整 JD、候选人简历和当前面试轮次，设计 0 到 2 道真正值得问的问题。"
-                    "先判断这个岗位最本质的工作矛盾，再从简历中选择最能验证该矛盾的真实经历；不得因为出现同一个技术名词就认为经历相关。"
-                    "问题要区分‘会复述概念’与‘真正理解并做过关键判断’，优先追问设计选择、机制、失败原因、取舍、认知边界或经历与岗位之间的关键落差。"
-                    "对于管培生和应届生，不假设成熟工作经验；可以深入课程、个人项目、比赛或实习，但问题仍需检验其是否能把技术用于真实问题。"
-                    "每道题只问一个核心问题，使用自然口语，候选人听一遍就能明白。"
-                    "存在confirmed_weight时，优先选高权重或关键项对应的简历经历，深入其工作判断；不为覆盖率硬凑题。所有问题只是建议。"
-                    "禁止使用‘你实际负责哪一部分’‘最后有什么结果’‘为什么愿意投入’‘讲一个具体案例’等通用模板，禁止机械要求 STAR、数字或结果。"
-                    "resume_quote 必须逐字复制简历中的一段连续原文；无法找到高价值切入点时返回空数组，不能硬凑问题。"
-                ),
-                payload={
-                    "candidate_stage": plan.get("preparation_context", {}).get("candidate_stage"),
-                    "job_title": job.title,
-                    "round_type": interview.round_type,
-                    "jd": ((plan.get(SNAPSHOT_KEY) or {}).get("source") or source_for_interview(interview, job))["jd_text"][:3800],
-                    "supplementary_requirements": ((plan.get(SNAPSHOT_KEY) or {}).get("source") or source_for_interview(interview, job)).get("supplementary_requirements", ""),
-                    "resume": resume_reference,
-                    "round_dimensions": dimension_payload,
-                },
+                instructions=QUESTION_INSTRUCTIONS,
+                payload=question_payload,
                 schema_name="resume_grounded_interview_questions",
                 schema=_resume_question_schema(),
                 timeout_seconds=max(self.settings.llm_timeout_seconds, 20),
-                max_tokens=1400,
+                max_tokens=2000,
                 model=self._planning_model(),
             )
         except IntelligenceProviderError as error:
@@ -435,48 +430,13 @@ class OpenAICompatibleProvider:
                 plan, [], status="degraded", error_code=error.code
             )
 
-        dimensions_by_id = {str(item.get("id")): item for item in dimensions}
-        forbidden = (
-            "你实际负责哪一部分",
-            "最后有什么结果",
-            "为什么愿意投入",
-            "讲一个具体案例",
-            "这件事最后具体变成",
+        questions = validated_preparation_questions(
+            output.get("questions"), dimensions, resume_reference,
+            source["jd_text"] + "\n" + source.get("supplementary_requirements", ""), interview.round_type,
+            (job.semantic_profile or {}).get("analysis_mode"),
         )
-        questions: list[dict[str, Any]] = []
-        for index, item in enumerate(output.get("questions", [])[:2]):
-            if not isinstance(item, dict):
-                continue
-            quote = str(item.get("resume_quote", "")).strip()
-            question = str(item.get("question", "")).strip()
-            follow_up = str(item.get("follow_up", "")).strip()
-            dimension_id = str(item.get("dimension_id", ""))
-            dimension = dimensions_by_id.get(dimension_id)
-            if (
-                not dimension
-                or len(quote) < 8
-                or quote not in resume_reference
-                or not 10 <= len(question) <= 220
-                or any(value in question for value in forbidden)
-            ):
-                continue
-            questions.append(
-                {
-                    "id": f"q-{interview.round_type}-semantic-resume-{index + 1}",
-                    "competency_id": f"jd_semantic.{dimension_id}",
-                    "competency_name": f"简历深挖 · {dimension.get('name') or '岗位关键判断'}",
-                    "question": question,
-                    "follow_up": follow_up[:240] or "根据候选人的回答，只追问最关键的判断依据。",
-                    "required": False,
-                    "source": "resume_jd_match",
-                    "generation_mode": "llm_semantic",
-                    "rationale": str(item.get("why_this_matters", ""))[:300],
-                    "source_evidence": f"简历原文：{quote}",
-                    "keywords": [],
-                    "jd_analysis_mode": (job.semantic_profile or {}).get("analysis_mode"),
-                }
-            )
-        return self._replace_resume_plan_questions(plan, questions, status="active")
+        return self._replace_resume_plan_questions(plan, questions, status="active",
+            error_code="question_validation_failed" if output.get("questions") and not questions else None)
 
     @staticmethod
     def _replace_resume_plan_questions(
@@ -518,12 +478,12 @@ class OpenAICompatibleProvider:
             effective_status = "no_grounded_match"
         output["semantic_question_assistance"] = {
             "status": effective_status,
-            "provider": "llm_semantic" if questions else "local_resume_grounding" if existing_resume_questions else None,
+            "provider": "llm_semantic" if questions else "local_resume_reference" if existing_resume_questions else None,
             "error_code": error_code,
             "model_question_count": len(questions),
             "fallback_question_count": len(existing_resume_questions) if not questions else 0,
         }
-        output["personalization_version"] = "resume-semantic-deep-dive-v1.2"
+        output["personalization_version"] = "experience-role-probes-v2"
         return output
 
     def draft_scorecard(self, db: Session, interview: InterviewRound, job: Job) -> dict[str, Any]:
@@ -556,7 +516,10 @@ class OpenAICompatibleProvider:
             return baseline
 
         competencies = round_evaluation_dimensions(db, interview, job)
-        if not baseline.get("ai_scores") and (interview.plan_payload or {}).get(SNAPSHOT_KEY):
+        if (interview.plan_payload or {}).get(SNAPSHOT_KEY):
+            # The fallback draft uses catalog IDs. Always align the draft with
+            # the frozen rubric before attaching semantic scores; a nonempty
+            # catalog draft otherwise silently discards all rubric results.
             baseline["ai_scores"] = [{"competency_id": c["id"], "competency_name": c["name"], "score": None,
                                       "evidence_ids": [], "confirmed_evidence_ids": []} for c in competencies]
         assessments, batch_status = self._assess_full_conversation(
@@ -1012,7 +975,8 @@ class OpenAICompatibleProvider:
         has_rubric = bool(payload.get("confirmed_job_criteria")) or any(
             c.get("confirmed_weight") is not None for c in payload.get("competencies", [])
         )
-        if has_rubric and payload_size(payload) > self.settings.llm_max_context_chars:
+        uses_job_requirements = schema_name in {"resume_grounded_interview_questions", "full_conversation_competency_assessment", "free_dialogue_job_evidence_batch", "candidate_dialogue_summary"}
+        if (has_rubric or uses_job_requirements) and payload_size(payload) > self.settings.llm_max_context_chars:
             # Never silently trim transcript evidence to accommodate custom rubric text.
             raise IntelligenceProviderError("context_overflow", "岗位标准与对话超出上下文预算，请精简标准或调整预算")
         review_request = schema_name in {"full_conversation_competency_assessment", "interview_scorecard_assistance",
@@ -1152,12 +1116,16 @@ class OpenAICompatibleProvider:
         competencies: list[dict[str, Any]],
         segments: list[TranscriptSegment],
     ) -> tuple[list[dict[str, Any]], dict[str, int | str]]:
-        rubric_size = payload_size({"competencies": [_live_competency_payload(c) for c in competencies]})
+        requirements = work_context(interview, job)
+        rubric_size = payload_size({**requirements, "competencies": [_live_competency_payload(c) for c in competencies]})
+        if rubric_size > self.settings.llm_max_context_chars - 800:
+            return [], {"status": "unavailable", "total_batches": 0, "completed_batches": 0,
+                        "failed_batches": 0, "error_code": "context_overflow"}
         batches = _conversation_batches(
             segments,
             max_chars=max(
-                2400,
-                min(7600, self.settings.llm_max_context_chars - max(3800, rubric_size + 1000)),
+                400,
+                min(7600, self.settings.llm_max_context_chars - rubric_size - 400),
             ),
         )
         assessments: list[dict[str, Any]] = []
@@ -1172,11 +1140,13 @@ class OpenAICompatibleProvider:
                         "只输出本批次有可观察证据的维度；没有证据的维度不要强行评分。1 分表示明确风险，3 分表示基本达到，5 分表示复杂约束下稳定表现。"
                         "1 分必须来自候选人明确表现出的风险行为或错误判断；未回答、回答短、口头语多、未提及某项内容只能形成 limitations，不能构成低分证据。"
                         "嗯、哦、好的、候选人反问和纯确认信息不得引用为能力证据。优先引用能体现事实、机制、判断依据、责任边界、取舍或修正的片段。"
+                        "rationale只写观察到的本人行为及其与岗位要求的对应关系；未提及、未说明等未知信息只放limitations，不用未知否定已经存在的事实。"
                         "不得基于姓名、年龄、性别、婚育、学校或公司光环评分，也不得推断人格、智力或潜力。"
                         + HIRING_CRITERIA + "维度评分仍使用1至5分；只返回给定schema的维度评估，不返回总体报告字段。"
                     ),
                     payload={
                         "job_title": job.title,
+                        **requirements,
                         "round_type": interview.round_type,
                         "interviewer_names": list(interview.interviewer_names or []),
                         "batch": {"index": index + 1, "total": len(batches)},
@@ -1223,10 +1193,13 @@ class OpenAICompatibleProvider:
     ) -> dict[str, Any] | None:
         application = db.get(Application, interview.application_id)
         candidate = db.get(Candidate, application.candidate_id) if application else None
+        requirements = work_context(interview, job)
+        fixed_size = payload_size(requirements) + len(candidate.resume_text[:1800] if candidate else "") + 650
+        if fixed_size > self.settings.llm_max_context_chars - 400:
+            raise IntelligenceProviderError("context_overflow", "岗位材料超出本次分析预算")
         batches = _conversation_batches(
             segments,
-            max_chars=max(1200, min(5200, self.settings.llm_max_context_chars - 5200 - payload_size(compact_rubric(interview))
-                                   - len(source_for_interview(interview, job).get("supplementary_requirements", "")[:2000]))),
+            max_chars=max(400, min(5200, self.settings.llm_max_context_chars - fixed_size)),
         )
         results: list[dict[str, Any]] = []
         failed = 0
@@ -1264,9 +1237,7 @@ class OpenAICompatibleProvider:
                         "candidate_name_reference_only": candidate.display_name if candidate else "",
                         "resume_reference": candidate.resume_text[:1800] if candidate else "",
                         "job_title": job.title,
-                        "jd_reference": source_for_interview(interview, job)["jd_text"][:2600],
-                        "confirmed_job_criteria": compact_rubric(interview),
-                        "supplementary_requirements": source_for_interview(interview, job).get("supplementary_requirements", "")[:2000],
+                        **requirements,
                         "configured_round_type": interview.round_type,
                         "answer_quality_review": ({key: response_review.get(key) for key in
                             ("status", "logic_score", "confidence", "summary")} if response_review else None),
@@ -1433,8 +1404,7 @@ class OpenAICompatibleProvider:
     def _synthesize_candidate_summary(self, job, interview, results, judgment):
         # A bounded synthesis of already validated batch observations, not a
         # second unbounded transcript upload. Raw evidence remains available for audit.
-        payload = {"job_title": job.title, "jd_reference": source_for_interview(interview, job)["jd_text"][:2600], "round_type": interview.round_type,
-            "confirmed_job_criteria": compact_rubric(interview),
+        payload = {"job_title": job.title, **work_context(interview, job), "round_type": interview.round_type,
             "observations": [{key: item[key] for key in ("score", "rationale", "decision", "positive_evidence", "risks", "unknowns", "evidence_segment_ids", "risk_evidence_segment_ids")} for item in results],
             "transcript": []}
         if payload_size(payload) > self.settings.llm_max_context_chars:
@@ -1516,13 +1486,14 @@ class OpenAICompatibleProvider:
                 continue
             rationale = str(item.get("rationale", "")).strip()
             limitations = str(item.get("limitations", "")).strip()
+            rationale, limitations = separate_evidence_rationale(rationale, limitations)
             direction = item.get("direction")
             if (
                 not referenced
                 or not 1 <= score <= 5
                 or not rationale
                 or direction not in {"support", "negative"}
-                or describes_absence_instead_of_behavior(rationale, limitations)
+                or describes_absence_instead_of_behavior(rationale)
             ):
                 continue
             grouped.setdefault(competency_id, []).append(
@@ -2176,16 +2147,19 @@ def _resume_question_schema() -> dict[str, Any]:
                     "properties": {
                         "dimension_id": {"type": "string"},
                         "resume_quote": {"type": "string"},
+                        "experience_anchor": {"type": "string"},
+                        "job_requirement_quote": {"type": "string"},
+                        "probe_target": {"type": "string"},
+                        "listen_for": {"type": "string"},
                         "question": {"type": "string"},
                         "follow_up": {"type": "string"},
-                        "why_this_matters": {"type": "string"},
                     },
                     "required": [
                         "dimension_id",
                         "resume_quote",
                         "question",
                         "follow_up",
-                        "why_this_matters",
+                        "experience_anchor", "job_requirement_quote", "probe_target", "listen_for",
                     ],
                 },
             }

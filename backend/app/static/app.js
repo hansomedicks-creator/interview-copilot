@@ -2610,9 +2610,26 @@ function renderRoundTabs() {
   });
 }
 
+function preparationQuestionCard(item, index, progress, answerState) {
+  const reference = item.is_preparation_reference;
+  const answer = reference ? null : answerState.get(item.id);
+  const sourceLabel = reference ? "简历切入线索 · 非生成问题" : item.required ? "统一参考（可跳过）" : item.source === "resume_jd_match" ? "简历经历 × 岗位要求" : item.source === "prior_round" ? "前轮待验证" : "可选问题";
+  const answerLabel = { unanswered: "尚未涉及", shallow: "部分涉及", evidenced: "已有相关回答" };
+  return `<article class="question-card ${reference ? "preparation-reference" : ""} ${item.required ? "required" : ""} ${progress.get(item.id)?.asked ? "asked" : ""} answer-${answer?.status || "unanswered"}">
+    <div class="question-card-head"><span class="target">${String(index + 1).padStart(2, "0")} · ${escapeHtml(item.competency_name)}</span><span class="question-badges"><span class="question-kind optional">${sourceLabel}</span>${reference ? "" : `<span class="answer-state ${answer?.status || "unanswered"}">${answerLabel[answer?.status || "unanswered"]}</span>`}</span></div>
+    <p>${escapeHtml(item.question)}</p>
+    ${reference ? `<small>AI 尚未生成个性化问题。你可以从这段经历自由提问，不必照着念。</small>` : ""}
+    ${item.follow_up ? `<small>可选追问：${escapeHtml(item.follow_up)}</small>` : ""}
+    ${answer?.status === "shallow" && answer.missing_dimensions?.length ? `<small class="answer-gap">待补：${escapeHtml(answer.missing_dimensions.join("、"))}</small>` : ""}
+    ${item.rationale ? `<details class="preparation-question-context"><summary>${reference ? "查看相关岗位要求" : "为什么建议问"}</summary><p>${escapeHtml(item.rationale)}</p>${item.job_requirement_quote ? `<small>岗位原文：${escapeHtml(item.job_requirement_quote)}</small>` : ""}${item.listen_for ? `<p>想听清什么：${escapeHtml(item.listen_for)}</p>` : ""}${item.source_evidence ? `<small>${escapeHtml(item.source_evidence)}</small>` : ""}</details>` : ""}
+    ${item.required ? `<button class="mark-asked" data-question-id="${escapeHtml(item.id)}">${progress.get(item.id)?.asked ? "撤销已问" : "标记已问"}</button>` : ""}
+  </article>`;
+}
+
 function renderPlan(plan = {}) {
   const questions = plan.questions || [];
   const conversationMode = plan.interview_mode === "conversation";
+  $("plan-refresh-btn").classList.toggle("hidden", conversationMode || !["planned", "ready"].includes(state.interview?.status));
   $("question-panel").classList.toggle("conversation-mode", conversationMode);
   if (conversationMode) {
     $("question-count").textContent = "自由";
@@ -2624,27 +2641,12 @@ function renderPlan(plan = {}) {
   }
   const progress = new Map((state.questionProgress?.items || []).map((item) => [item.question_id, item]));
   const answerState = new Map((state.questionCoverage || []).map((item) => [item.question_id, item]));
-  const sourceLabel = (item) => item.required ? "核心问题参考" : item.source === "resume_jd_match" ? "简历经历 × 岗位重点" : item.source === "resume_personalized" ? "简历核实" : item.source === "prior_round" ? "前轮待验证" : "通用可选";
-  const answerLabel = { unanswered: "未验证", shallow: "部分涉及", evidenced: "已有充分证据" };
-  $("question-count").textContent = questions.length;
-  $("question-list").innerHTML = questions.map((item, index) => {
-    const answer = answerState.get(item.id);
-    return `
-    <article class="question-card ${item.required ? "required" : ""} ${progress.get(item.id)?.asked ? "asked" : ""} answer-${answer?.status || "unanswered"}">
-      <div class="question-card-head">
-        <span class="target">${String(index + 1).padStart(2, "0")} · ${escapeHtml(item.competency_name)}</span>
-        <span class="question-badges">
-          <span class="question-kind ${item.required ? "" : "optional"}">${sourceLabel(item)}</span>
-          <span class="answer-state ${answer?.status || "unanswered"}">${answerLabel[answer?.status || "unanswered"]}</span>
-        </span>
-      </div>
-      <p>${escapeHtml(item.question)}</p>
-      <small>可选追问：${escapeHtml(item.follow_up)}</small>
-      ${answer?.status === "shallow" && answer.missing_dimensions?.length ? `<small class="answer-gap">待补：${escapeHtml(answer.missing_dimensions.join("、"))}</small>` : ""}
-      ${item.rationale ? `<small class="question-rationale">建议依据：${escapeHtml(item.rationale)}${item.source_evidence ? ` · ${escapeHtml(item.source_evidence)}` : ""}</small>` : ""}
-      ${item.required ? `<button class="mark-asked" data-question-id="${item.id}">${progress.get(item.id)?.asked ? "撤销已问" : "标记已问"}</button>` : ""}
-    </article>
-  `}).join("") || '<p class="muted">尚未生成计划</p>';
+  const general = questions.filter(item => ["round_standard", "company_standard"].includes(item.source));
+  const specific = questions.filter(item => !general.includes(item));
+  $("question-count").textContent = questions.filter(item => !item.is_preparation_reference).length;
+  $("question-list").innerHTML = specific.map((item, index) => preparationQuestionCard(item, index, progress, answerState)).join("")
+    + (general.length ? `<details class="standard-question-reference"><summary>统一开场参考 · ${general.length} 道（可跳过）</summary>${general.map((item, index) => preparationQuestionCard(item, specific.length + index, progress, answerState)).join("")}</details>` : "")
+    || '<p class="muted">尚未找到可用的准备线索，可以直接自由交流。</p>';
   document.querySelectorAll("[data-question-id]").forEach((button) => button.addEventListener("click", toggleQuestionAsked));
   const total = state.questionProgress?.required_total || 0;
   const asked = state.questionProgress?.required_asked || 0;
@@ -2655,14 +2657,20 @@ function renderPlan(plan = {}) {
     resume_personalized: questions.filter((item) => item.source === "resume_personalized").length,
     prior_round: questions.filter((item) => item.source === "prior_round").length,
   };
-  const mixLabels = [`${mix.required || 0} 道核心参考`, `${mix.resume_jd_match || 0} 道简历经历题`];
+  const generated = questions.filter(item => item.source === "resume_jd_match" && !item.is_preparation_reference).length;
+  const references = questions.filter(item => item.is_preparation_reference).length;
+  const mixLabels = [`${generated} 道经历定制问题`];
+  if (references) mixLabels.push(`${references} 条简历线索（不是生成问题）`);
+  if (general.length) mixLabels.push(`${general.length} 道统一参考已折叠`);
   if (mix.company_standard) mixLabels.push(`${mix.company_standard} 道公司通用`);
   if (mix.resume_personalized) mixLabels.push(`${mix.resume_personalized} 道简历定制`);
   if (mix.prior_round) mixLabels.push(`${mix.prior_round} 道前轮待验证`);
   const semanticQuestions = plan.semantic_question_assistance || {};
-  if (semanticQuestions.status === "fallback_preserved") mixLabels.push("深度模型未产出有效题，已保留简历核实题");
+  if (semanticQuestions.status === "fallback_preserved") mixLabels.push("个性化问题尚未生成，可从简历线索自由提问");
   if (semanticQuestions.status === "no_grounded_match") mixLabels.push("简历中暂未找到与本轮岗位重点直接相关的经历");
   if (semanticQuestions.status === "degraded") mixLabels.push("深度问题服务暂不可用");
+  if (semanticQuestions.error_code === "context_overflow") mixLabels.push("材料超过分析预算，未静默截断");
+  if (semanticQuestions.error_code === "question_validation_failed") mixLabels.push("生成结果未通过原文与重复校验，可重新生成");
   $("question-mix").textContent = mixLabels.join(" · ");
   $("required-progress-bar").style.width = `${total ? (asked / total) * 100 : 0}%`;
 }
@@ -2686,6 +2694,7 @@ function renderStatus() {
   const interview = state.interview;
   const labels = { planned: "待准备", in_progress: "面试进行中", completed: "已完成" };
   $("session-state").textContent = labels[interview.status] || interview.status;
+  $("plan-refresh-btn").classList.toggle("hidden", interview.interview_mode === "conversation" || !["planned", "ready"].includes(interview.status));
   const notified = interview.notice_status === "acknowledged";
   $("notice-gate").classList.toggle("done", notified);
   $("notice-check").checked = notified;
@@ -3495,6 +3504,21 @@ function escapeHtml(value) {
 }
 
 $("today-btn").addEventListener("click", enterTodayInterviews);
+$("plan-refresh-btn").addEventListener("click", async () => {
+  const interviewId = state.interviewId;
+  const button = $("plan-refresh-btn");
+  button.disabled = true;
+  button.textContent = "正在生成…";
+  try {
+    const result = await api(`/api/v1/interviews/${interviewId}/preparation/refresh`, {method: "POST"});
+    if (state.interviewId === interviewId) {
+      state.interview.plan_payload = result.plan_payload;
+      renderPlan(result.plan_payload);
+      toast(result.plan_payload.semantic_question_assistance?.status === "active" ? "准备问题已更新，仍可自由提问" : "暂未生成有效问题，已保留明确标注的简历线索");
+    }
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "重新生成"; }
+});
 document.querySelectorAll("[data-app-nav]").forEach((button) => button.addEventListener("click", async () => {
   const target = button.dataset.appNav;
   if (target === "home") await showHomeView();

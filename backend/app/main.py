@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from pypdf import PdfReader
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
@@ -105,6 +105,7 @@ from .schemas import (
     TranscriptSegmentRead,
 )
 from .services.planning import build_plan, prior_round_context
+from .services.preparation_questions import PREPARATION_POLICY
 from .services.job_semantics import build_local_job_semantic_profile
 from .services import job_assessment
 from .services.action_center import (
@@ -2114,6 +2115,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             or interview.plan_payload.get("interview_mode") != interview.interview_mode
             or interview.plan_payload.get("round_type") != interview.round_type
             or interview.plan_payload.get("question_bank_version") != expected_bank
+            or (interview.status == "planned" and interview.plan_payload.get("preparation_policy") != PREPARATION_POLICY)
             or (
                 interview.status == "planned"
                 and interview.plan_payload.get("semantic_question_assistance", {}).get("status") == "active"
@@ -2217,6 +2219,22 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         interview.notice_acknowledged_by = payload.acknowledged_by
         db.commit()
         return interview
+
+    @app.post("/api/v1/interviews/{interview_id}/preparation/refresh")
+    def refresh_preparation(interview_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+        interview, _, _, job = _context_or_404(db, interview_id)
+        if interview.status not in {"planned", "ready"}:
+            raise HTTPException(409, "只能在面试开始前重新生成准备问题，不覆盖进行中或已结束面试")
+        plan = _build_interview_plan(db, request.app.state.intelligence, interview, job)
+        # The model call can take seconds. Check the phase atomically at write
+        # time as well, in case another browser started the interview meanwhile.
+        changed = db.execute(update(InterviewRound).where(InterviewRound.id == interview_id,
+            InterviewRound.status.in_(["planned", "ready"])).values(plan_payload=plan, plan_version=plan["version"]))
+        if changed.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, "面试已经开始，保留原准备问题")
+        db.commit()
+        return {"plan_payload": plan}
 
     @app.post("/api/v1/interviews/{interview_id}/start", response_model=InterviewRoundRead)
     def start_interview(

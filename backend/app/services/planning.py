@@ -12,6 +12,7 @@ from .company_profile import company_required_questions
 from .job_semantics import build_local_job_semantic_profile
 from .resume_recognition import recognize_resume
 from .job_assessment import SNAPSHOT_KEY, freeze_for_interview, rubric_dimensions
+from .preparation_questions import PREPARATION_POLICY
 
 
 def preparation_context(db: Session, interview: InterviewRound) -> dict[str, Any]:
@@ -83,20 +84,17 @@ def personalized_questions(context: dict[str, Any], round_type: str) -> list[dic
         dimension_id = str(dimension.get("id") or f"{round_type}-{index + 1}")
         dimension_name = str(dimension.get("name") or "岗位职责核实")
         evidence_target = str(dimension.get("evidence_target") or "具体情境、本人行动和可验证结果")
-        spoken_question, spoken_follow_up = _spoken_resume_match_question(
-            resume_excerpt,
-            round_type=round_type,
-            candidate_stage=context.get("candidate_stage", "experienced"),
-        )
         output.append({
             "id": f"q-{round_type}-resume-match-{index + 1}",
             "competency_id": f"jd_semantic.{dimension_id}",
             "competency_name": f"简历相关经历 · {dimension_name}",
-            "question": spoken_question,
-            "follow_up": spoken_follow_up,
+            "question": resume_excerpt,
+            "follow_up": "",
+            "is_preparation_reference": True,
+            "generation_mode": "local_resume_reference",
             "required": False,
             "source": "resume_jd_match",
-            "rationale": f"JD 只用于选择重点，问题从候选人简历中的相近经历出发；核实：{evidence_target}",
+            "rationale": f"本地仅定位到可能相关的简历片段，尚未生成个性化问题，也不代表经历匹配。岗位关注：{evidence_target}",
             "source_evidence": f"简历原文：{resume_excerpt}",
             "keywords": _matching_terms(str(dimension.get("source_excerpt") or ""), resume_excerpt),
             "jd_analysis_mode": context.get("jd_analysis_mode"),
@@ -161,18 +159,7 @@ def build_plan(
     # company-wide standard, use its highest-priority item; otherwise use the
     # first round competency. Everything else starts from this candidate's CV.
     company_questions = company_questions[:1]
-    for question in company_questions:
-        spoken = _spoken_standard_question(
-            {
-                "id": str(question.get("competency_id", "")).removeprefix("company."),
-                "name": question.get("competency_name", "公司通用能力"),
-                "question": question.get("question"),
-                "follow_up": question.get("follow_up"),
-            },
-            candidate_stage=context.get("candidate_stage", "experienced"),
-        )
-        question["question"], question["follow_up"] = spoken
-        question["required"] = True
+    # Preserve HR's explicitly confirmed wording; never replace it with our catalog template.
     if not company_questions and competencies:
         item = competencies[0]
         spoken = _spoken_standard_question(
@@ -200,13 +187,14 @@ def build_plan(
                 carryover.append({
                     "id": f"q-{interview.round_type}-prior-{prior['source_round_id']}-{index}",
                     "competency_id": "prior_round_followup", "competency_name": "前轮待验证",
-                    "question": question_text, "follow_up": "请补充具体行动、结果和可验证细节。",
+                    "question": question_text, "follow_up": "",
                     "required": False, "source": "prior_round", "rationale": "由前轮已记录的待验证问题带入",
                     "source_evidence": f"前轮：{prior['source_round_type']}",
                 })
     questions = [*company_questions, *standard_questions, *personalized, *carryover]
     return {
         "version": "plan-v1.1",
+        "preparation_policy": PREPARATION_POLICY,
         SNAPSHOT_KEY: context.get(SNAPSHOT_KEY),
         "interview_mode": interview.interview_mode,
         "mode_label": "智能混合面试" if interview.interview_mode == "structured" else "旧版自由对话",
@@ -256,33 +244,6 @@ def _role_level(title: str, jd_text: str) -> str:
 def _short_job_context(value: str) -> str:
     compact = " ".join(value.replace("\n", " ").split()).strip("；。 ")
     return compact if len(compact) <= 56 else f"{compact[:54]}…"
-
-
-def _spoken_resume_match_question(
-    resume_excerpt: str,
-    *,
-    round_type: str,
-    candidate_stage: str,
-) -> tuple[str, str]:
-    excerpt = _short_job_context(resume_excerpt)
-    if candidate_stage == "student":
-        lead = f"你简历里写到“{excerpt}”。这段可以是课程、比赛、社团、实习或个人项目，"
-    else:
-        lead = f"你简历里写到“{excerpt}”。"
-    if round_type == "hr":
-        return (
-            f"{lead}哪件具体的事让你更想继续做这类工作？",
-            "同一段经历里，有没有哪件事让你觉得自己并不适合？",
-        )
-    if round_type == "ceo":
-        return (
-            f"{lead}如果重新做一次，你会先改哪一步？",
-            "是什么事实让你现在会这样改？",
-        )
-    return (
-        f"{lead}这里面哪个判断最难？你当时依据什么作了选择？",
-        "如果当时判断错了，最先会出现什么信号？",
-    )
 
 
 def _spoken_standard_question(
@@ -360,20 +321,18 @@ _MATCH_CONCEPTS: dict[str, tuple[str, ...]] = {
 
 def _resume_excerpts(resume_text: str) -> list[str]:
     excerpts: list[str] = []
-    current_section = ""
     for raw_line in resume_text.splitlines():
-        line = " ".join(raw_line.split()).strip(" ·•|-—；;。")
+        line = raw_line.strip(" \t·•|-—；;。")
         if not line:
             continue
         if _RESUME_SECTION_MARKERS.fullmatch(line):
-            current_section = line
             continue
         if _RESUME_NOISE.search(line) or re.fullmatch(r"[\d./年月日\s~至到—-]+", line):
             continue
         for part in re.split(r"[。；;]", line):
             part = part.strip(" ·•|-—，,")
             if 8 <= len(part) <= 180:
-                excerpt = f"{current_section}：{part}" if current_section and current_section not in part else part
+                excerpt = part
                 if excerpt not in excerpts:
                     excerpts.append(excerpt)
     return excerpts

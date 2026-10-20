@@ -65,8 +65,8 @@ def test_hybrid_report_not_gated_by_prepared_questions_or_other_model_failures(t
             assert ai["decision"] == "advance"
             assert report["details"][0]["quotes"]
             assert "独立执行" in report["summary"]
-            assert report["job_fit_analysis"][0]["title"] == "亲自履职与判断"
-            assert report["assessment_policy"] == "job-readiness-strict-v1"
+            assert report["job_fit_analysis"][0]["title"] == "本人履职与判断"
+            assert report["assessment_policy"] == "job-readiness-strict-v2"
 
 
 def test_insufficient_for_score_still_returns_specific_dialogue_analysis(monkeypatch):

@@ -148,6 +148,16 @@ def describes_absence_instead_of_behavior(*values: str) -> bool:
     return any(marker in combined for marker in _ABSENCE_MARKERS)
 
 
+def separate_evidence_rationale(rationale: str, limitations: str) -> tuple[str, str]:
+    """Keep observed clauses separate from unknowns; never turn pure absence into evidence."""
+    clauses = re.split(r"(?<=[。；;])|(?=但未|但没有证据|然而未|不过未)", rationale)
+    observed, unknowns = [], []
+    for clause in clauses:
+        if clause.strip():
+            (unknowns if describes_absence_instead_of_behavior(clause) else observed).append(clause.strip())
+    return "".join(observed), "；".join(filter(None, [limitations, *unknowns]))
+
+
 def is_usable_evidence_record(
     *,
     quote: str,

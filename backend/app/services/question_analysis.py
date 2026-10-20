@@ -81,7 +81,7 @@ def analyze_question_answers(
     turn_intents: dict | None = None,
 ) -> dict[str, Any]:
     """Link candidate answers to planned questions without turning inference into a human fact."""
-    question_by_id = {item.get("id"): item for item in questions if item.get("id")}
+    question_by_id = {item.get("id"): item for item in questions if item.get("id") and not item.get("is_preparation_reference")}
     terms_by_id = {question_id: _question_terms(question) for question_id, question in question_by_id.items()}
     linked: dict[str, list[TranscriptSegment]] = defaultdict(list)
     active_question_id: str | None = None

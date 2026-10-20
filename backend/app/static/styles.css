@@ -1790,5 +1790,9 @@ body.role-admin .task-header > div > .kicker { display: none; }
 .assessment-preview { padding: 16px; border-radius: 10px; background: #f5f2ff; }
 .assessment-table-wrap { overflow-x: auto; }
 .weighted-assessment { padding: 12px 0; }
+.standard-question-reference > summary, .preparation-question-context > summary { cursor: pointer; padding: 10px 0; color: var(--text-secondary); font-size: 14px; line-height: 1.5; }
+.preparation-question-context p { font-size: 14px; line-height: 1.7; }
+.preparation-reference { border-style: dashed; background: var(--bg-page); }
+.preparation-actions { display: flex; align-items: center; gap: 8px; }
 .weighted-assessment th, .weighted-assessment td { padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e5e1ef; }
 @media (max-width: 700px) { .job-assessment-editor { padding: 14px; } .assessment-heading { grid-template-columns: minmax(0, 1fr) 80px; } }

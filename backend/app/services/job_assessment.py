@@ -192,5 +192,13 @@ def source_for_interview(interview: InterviewRound, job: Job) -> dict:
 
 
 def compact_rubric(interview: InterviewRound) -> list[dict]:
-    return [{key: c[key] for key in ("id", "name", "definition", "weight", "critical")}
+    return [{key: c[key] for key in ("id", "name", "definition", "weight", "critical", "score_anchors")}
             for c in rubric_dimensions((interview.plan_payload or {}).get(SNAPSHOT_KEY), interview.round_type)]
+
+
+def work_context(interview: InterviewRound, job: Job) -> dict:
+    """Same authoritative requirements for dimension scoring and the final review."""
+    source = source_for_interview(interview, job)
+    return {"jd_reference": source["jd_text"],
+            "supplementary_requirements": source.get("supplementary_requirements", ""),
+            "confirmed_job_criteria": compact_rubric(interview)}

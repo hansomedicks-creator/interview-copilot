@@ -861,6 +861,10 @@ def test_production_plan_uses_model_to_design_resume_grounded_deep_question(tmp_
                 "questions": [{
                     "dimension_id": "business-1",
                     "resume_quote": resume_quote,
+                    "experience_anchor": "三层记忆",
+                    "job_requirement_quote": "把业务问题转化为可落地的 AI 方案",
+                    "probe_target": "核实能否区分记忆机制与幻觉的原因，说明保留和舍弃的影响",
+                    "listen_for": "能够解释每层信息的作用、失效边界和选择依据，而非复述名词",
                     "question": "三层记忆里，如果只能保留一层来降低幻觉，你会保留哪层？判断依据是什么？",
                     "follow_up": "什么现象会证明你的选择其实错了？",
                     "why_this_matters": "区分会罗列架构与能理解记忆机制、失败模式和取舍。",
@@ -1272,11 +1276,24 @@ def test_streaming_fragments_are_joined_before_semantic_follow_up(tmp_path):
         assert len(suggestion["evidence_segment_ids"]) == 2
 
 
+def set_synthetic_prepared_experience_question(client, interview_id):
+    """A real prepared question fixture, not a local resume-reference card."""
+    with client.app.state.database.session_factory() as db:
+        interview = db.get(InterviewRound, interview_id)
+        plan = json.loads(json.dumps(interview.plan_payload))
+        question = next(q for q in plan["questions"] if q["source"] == "resume_jd_match")
+        question.update(question="推进项目时，你为什么先选择做某一步？依据是什么？",
+                        is_preparation_reference=False, generation_mode="synthetic_prepared_question")
+        interview.plan_payload = plan
+        db.commit()
+
+
 def test_live_analysis_links_jd_question_and_generates_gap_specific_follow_up(tmp_path):
     with make_client(tmp_path) as client:
         bootstrapped = bootstrap(client)
         interview_id = bootstrapped["active_interview_id"]
         hr_interview_id = next(item["id"] for item in bootstrapped["rounds"] if item["round_type"] == "hr")
+        set_synthetic_prepared_experience_question(client, interview_id)
         detail = client.get(f"/api/v1/interviews/{interview_id}").json()
         jd_question = next(
             item
@@ -1776,7 +1793,9 @@ def test_resume_question_is_simple_and_fact_first(tmp_path):
         plan = client.get(f"/api/v1/interviews/{interview_id}").json()["interview"]["plan_payload"]
         resume_question = next(item for item in plan["questions"] if item["source"] == "resume_jd_match")
         assert "负责客户接待与投诉处理" in resume_question["source_evidence"]
-        assert "哪个判断最难" in resume_question["question"]
+        assert resume_question["is_preparation_reference"]
+        assert resume_question["generation_mode"] == "local_resume_reference"
+        assert "哪个判断最难" not in resume_question["question"]
         assert not any(word in resume_question["question"] for word in ("证明", "胜任", "优先验证", "前三个月"))
 
 
@@ -2355,6 +2374,7 @@ def test_end_creates_scorecard_and_human_submission_creates_deidentified_knowled
         bootstrapped = bootstrap(client)
         interview_id = bootstrapped["active_interview_id"]
         candidate_name = client.get(f"/api/v1/interviews/{interview_id}").json()["candidate"]["display_name"]
+        set_synthetic_prepared_experience_question(client, interview_id)
         acknowledge_and_start(client, interview_id)
 
         ended = client.post(f"/api/v1/interviews/{interview_id}/end")

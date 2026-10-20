@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.3.2-interviewer-home" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.3.3-experience-probes" />
   </head>
   <body>
     <header class="topbar">
@@ -516,11 +516,11 @@
         <div class="console-grid">
           <aside id="question-panel" class="panel plan-panel">
             <div class="panel-heading">
-              <div><span class="kicker">CORE QUESTIONS</span><h3>核心问题参考</h3></div>
-              <span class="count" id="question-count">0</span>
+              <div><span class="kicker">PREPARATION</span><h3>可提问的问题</h3></div>
+              <div class="preparation-actions"><button id="plan-refresh-btn" class="text-button hidden" type="button">重新生成</button><span class="count" id="question-count">0</span></div>
             </div>
             <div class="required-summary">
-              <strong>核心问题参考</strong>
+              <strong>仅供参考，按你的面试习惯交流</strong>
               <span id="required-progress">尚未验证</span>
               <small>可以直接提问、改写、跳过或自由追问。AI 跟随真实对话判断相关证据。</small>
               <small id="question-mix" class="question-mix">正在整理本轮题目结构…</small>
@@ -683,6 +683,6 @@
     </dialog>
     <div id="toast" class="toast hidden"></div>
     <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
-    <script src="/static/app.js?v=1.3.2-interviewer-home" defer></script>
+    <script src="/static/app.js?v=1.3.3-experience-probes" defer></script>
   </body>
 </html>
