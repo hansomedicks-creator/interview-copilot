@@ -60,7 +60,7 @@ python3 /opt/interview-copilot/current/deploy/linux/manage.py verify-backup
 
 ## 更新与回滚
 
-初始脚本不是自动升级工具，不会替换已有发布。后续发布应在无正在进行面试时操作：先备份并验证恢复，保留当前 SHA；在新的发布目录中安装并检查依赖，停止应用后切换 `current`，启动并执行 smoke。失败时切回原链接并再次启动。代码回滚不等于数据库回滚；现有 `create_all` / 轻量 ALTER 机制没有可逆迁移，恢复数据库和文件需要停写、核对备份及单独确认，禁止在生产库直接执行临时验证库的步骤。
+初始脚本不是自动升级工具，不会替换已有发布。后续发布应在无正在进行面试时操作：先备份并验证恢复，保留当前 SHA；在新的发布目录中安装并检查依赖，停止应用后切换 `current`，共同启动应用与代理（`systemctl start interview-copilot interview-copilot-proxy`），再执行应用 smoke 与 HTTPS 检查。代理单元 `Requires=interview-copilot.service`：停止应用会联动停止代理，但单独启动应用不会自动启动代理。失败时切回原链接，同样共同启动两个服务并检查公网 HTTPS，不能只恢复 8000 端口。代码回滚不等于数据库回滚；现有 `create_all` / 轻量 ALTER 机制没有可逆迁移，恢复数据库和文件需要停写、核对备份及单独确认，禁止在生产库直接执行临时验证库的步骤。
 
 ## 正式开放前剩余配置
 
