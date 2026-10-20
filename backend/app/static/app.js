@@ -222,14 +222,13 @@ async function loadPersonalActionCenter() {
   const center = state.personalActions;
   const summary = center.summary;
   const visibleItems = center.items.slice(0, 4);
-  $("my-action-center").classList.toggle("hidden", center.items.length === 0);
   $("my-action-summary").textContent = `今日 ${summary.today_interviews} · 待评价 ${summary.feedback_due} · 七天内 ${summary.upcoming_7_days}`;
   $("my-action-boundary").textContent = center.boundary;
   $("my-action-list").innerHTML = visibleItems.map((item) => `
     <article class="my-action-card ${escapeHtml(item.priority)}">
       <div><h3>${escapeHtml(item.title)} · ${escapeHtml(item.candidate.display_name)}</h3><p>${escapeHtml(item.job.title)} · ${item.scheduled_at ? new Date(item.scheduled_at).toLocaleString("zh-CN") : "时间待定"}</p><small>${escapeHtml(item.detail)}</small></div>
       <div class="my-action-buttons"><button class="${item.type === "feedback_due" ? "primary" : "secondary"} compact" data-my-action="${escapeHtml(item.interview_id)}">${escapeHtml(item.action_label)}</button>${item.type === "feedback_due" ? `<button class="secondary compact todo-remove" data-dismiss-feedback="${escapeHtml(item.interview_id)}">移出待评价</button>` : ""}</div>
-    </article>`).join("");
+    </article>`).join("") || `<div class="my-action-empty"><strong>暂时没有待办</strong><span>分配给你的面试和待完成评价会显示在这里。面试安排有疑问时，请联系 HR。</span></div>`;
   document.querySelectorAll("[data-my-action]").forEach((button) => button.addEventListener("click", () => openInterviewFromAction(button.dataset.myAction)));
   document.querySelectorAll("#my-action-list [data-dismiss-feedback]").forEach((button) => button.addEventListener("click", dismissFeedbackTodo));
 }

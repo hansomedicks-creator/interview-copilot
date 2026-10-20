@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.3.1-weighted-assessment" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.3.2-interviewer-home" />
   </head>
   <body>
     <header class="topbar">
@@ -70,10 +70,10 @@
         <small>AI 本轮参考</small>
         <strong id="sidebar-score-value">—</strong>
         <span id="sidebar-score-decision">等待评价</span>
-        <button id="sidebar-score-open" type="button" class="text-button">查看证据与建议</button>
+        <button id="sidebar-score-open" type="button" class="text-button">查看分析与建议</button>
       </section>
       <div class="sidebar-user"><span>当前用户</span><strong id="sidebar-user-role">—</strong></div>
-      <p>证据优先<br />最终决定由人作出</p>
+      <p>AI 辅助交流与整理<br />面试判断由你作出</p>
     </aside>
 
     <main>
@@ -87,32 +87,25 @@
 
       <section id="welcome" class="home-shell hidden">
         <div class="welcome-card">
-          <div>
-          <div class="eyebrow">EVIDENCE FIRST · HUMAN DECIDES</div>
-          <h1>让每一次面试，都能回到证据。</h1>
-          <p>
-            面试官从今日安排进入场次，HR 从面试任务开始组织候选人、岗位和岗位级流程。
-            所有评价以可复核证据为基础，最终决定始终由人作出。
-          </p>
+          <header class="interviewer-home-header">
+            <div>
+              <h1>面试工作台</h1>
+              <p>专注和候选人交流，AI 帮你记录对话、提示追问、整理评价。</p>
+            </div>
             <div class="welcome-actions">
-              <button id="today-btn" class="primary large">进入我的面试安排</button>
-              <button id="admin-open-btn" class="secondary large hr-only hidden">HR 招聘任务后台</button>
+              <button id="today-btn" class="primary">查看我的面试安排</button>
+              <button id="admin-open-btn" class="secondary hr-only hidden">HR 招聘任务后台</button>
             </div>
-            <div id="agenda-empty-state" class="agenda-empty-state hidden">
-              <strong>未来 7 天暂时没有分配给你的面试</strong>
-              <span>面试已创建但分配给其他人时，也不会出现在“我的安排”里；HR 可到招聘任务后台核对。</span>
-            </div>
-            <section id="my-action-center" class="my-action-center hidden">
-              <div class="my-action-heading"><div><span class="kicker">MY ACTIONS</span><h2>我的面试待办</h2></div><span id="my-action-summary"></span></div>
-              <div id="my-action-list" class="my-action-list"></div>
-              <small id="my-action-boundary" class="my-action-boundary"></small>
-            </section>
+          </header>
+          <div id="agenda-empty-state" class="agenda-empty-state hidden">
+            <strong>未来 7 天暂无分配给你的面试</strong>
+            <span>如果已收到面试邀请，请联系 HR 核对安排和飞书账号。</span>
           </div>
-          <div class="principle-stack">
-            <div><b>01</b><span>标准先行<br /><small>同轮次使用统一能力项</small></span></div>
-            <div><b>02</b><span>原文可追溯<br /><small>评分必须绑定逐字稿</small></span></div>
-            <div><b>03</b><span>人工作决定<br /><small>AI 只生成建议草稿</small></span></div>
-          </div>
+          <section id="my-action-center" class="my-action-center" aria-label="我的面试待办">
+            <div class="my-action-heading"><h2>我的待办</h2><span id="my-action-summary" aria-live="polite"></span></div>
+            <div id="my-action-list" class="my-action-list"><div class="my-action-empty"><strong>正在加载面试待办…</strong></div></div>
+            <small id="my-action-boundary" class="my-action-boundary"></small>
+          </section>
         </div>
 
         <section id="task-creator" class="task-creator panel hidden">
@@ -690,6 +683,6 @@
     </dialog>
     <div id="toast" class="toast hidden"></div>
     <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
-    <script src="/static/app.js?v=1.3.1-weighted-assessment" defer></script>
+    <script src="/static/app.js?v=1.3.2-interviewer-home" defer></script>
   </body>
 </html>
