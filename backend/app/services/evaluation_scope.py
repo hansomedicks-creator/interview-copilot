@@ -43,7 +43,7 @@ def round_evaluation_dimensions(
             continue
         name = str(item.get("name") or "岗位职责证据")
         evidence_target = str(
-            item.get("evidence_target") or "具体情境、本人行动与可验证结果"
+            item.get("evidence_target") or "与岗位相关的本人做法、判断依据与适用边界"
         )
         dimensions.append(
             {
@@ -53,13 +53,13 @@ def round_evaluation_dimensions(
                     item.get("definition") or f"核实候选人在{name}方面的岗位相关行为"
                 ),
                 "positive_evidence": [evidence_target],
-                "risk_signals": ["只能给出抽象结论，无法说明本人行动或可核验结果"],
+                "risk_signals": ["候选人明确表现出的错误判断或做法与岗位核心要求冲突；未谈到保持未知"],
                 "score_anchors": {
-                    "1": "没有岗位相关事实，或已有事实与岗位要求明显冲突。",
+                    "1": "已有具体事实与岗位要求明显冲突；缺少事实不评分。",
                     "3": f"能够提供基本可核实的{evidence_target}。",
                     "5": f"在复杂约束下稳定呈现{evidence_target}，并能说明复盘与迁移。",
                 },
-                "evidence_requirements": ["候选人原话", "具体事实", "本人行动", "可核验结果"],
+                "evidence_requirements": ["候选人原话", "与实际问题相关的本人做法或判断；不强制量化结果"],
                 "keywords": [],
                 "question": str(item.get("question") or ""),
                 "follow_up": str(item.get("follow_up") or ""),

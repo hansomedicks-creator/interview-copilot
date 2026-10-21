@@ -162,7 +162,7 @@ def test_quality_schema_contains_all_seven_observable_dimensions():
     (4.9, "hold", [], [], [], "hold"),
     (4.9, "advance", [], [], ["非核心工具细节尚未提及"], "advance"),
     (4.0, "advance", ["其他场景尚未核实"], [], [], "advance"),
-    (1.2, "reject", ["明确岗位风险"], ["invented-id"], [], "hold"),
+    (1.2, "reject", ["明确岗位风险"], ["invented-id"], [], "invalid_response"),
     (1.2, "reject", ["候选人明确表示不负责部署"], ["a"], [], "reject"),
     (3.2, "advance", [], [], [], "advance"),
 ])
@@ -184,6 +184,13 @@ def test_direction_requires_context_not_mean_score(monkeypatch, score, decision,
                 "evidence_segment_ids": ["a"], "rationale": "基于实际职责和本轮回答判断"}
     monkeypatch.setattr(provider, "_chat_json", synthetic_review)
     interview = InterviewRound(application_id="synthetic", round_type="business", interviewer_names=[], status="completed")
+    if expected == "invalid_response":
+        from app.providers.openai_compatible import IntelligenceProviderError
+        with pytest.raises(IntelligenceProviderError) as error:
+            provider._assess_free_dialogue(ReadOnlyDatabase(), interview, Job(title="开发", jd_text="负责接口开发和部署"), rows)
+        assert error.value.code == "invalid_response"
+        assert interview.status == "completed"
+        return
     result = provider._assess_free_dialogue(ReadOnlyDatabase(), interview, Job(title="开发", jd_text="负责接口开发和部署"), rows)
     assert result["decision"] == expected
     assert result["overall_score"] == score

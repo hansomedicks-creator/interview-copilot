@@ -209,6 +209,42 @@ def test_rubric_propagates_to_resume_question_prompt(db, monkeypatch):
     assert seen["payload"]["round_dimensions"][0]["confirmed_weight"] == 70
 
 
+def test_new_round_preparation_uses_inherited_frozen_source_before_plan_is_saved(db, monkeypatch):
+    job, draft = job_and_draft(db); rubric.activate(db, job, draft, "HR")
+    first = new_interview(db, job)
+    job.jd_text = "后来改为完全不同的管理岗位职责"
+    job.title = "新的岗位名称"
+    second = InterviewRound(id="new-round", application_id=first.application_id, round_type="business")
+    db.add(second); db.flush()
+    plan = build_plan(db, second, [])
+    assert not second.plan_payload
+    service = OpenAICompatibleProvider(Settings(llm_api_key="test-only", llm_model="test-model"))
+    seen = {}
+    def chat(**kw):
+        seen.update(kw)
+        return {"questions": []}
+    monkeypatch.setattr(service, "_chat_json", chat)
+    service.refine_interview_plan(db, second, job, plan)
+    assert seen["payload"]["jd"] == JD
+    assert seen["payload"]["job_title"] == "生产工程师"
+
+
+def test_weighted_verdict_adjustment_is_explained_in_report_and_recommendation(db):
+    job, draft = job_and_draft(db); rubric.activate(db, job, draft, "HR")
+    interview = new_interview(db, job)
+    original = "候选人解释了协作交付流程，对话模型建议通过。"
+    output = {"ai_scores": [scored("collaboration", 5)], "recommendation": {
+        "ai_recommendation": {"decision": "advance", "rationale": original},
+        "candidate_analysis": {"status": "complete", "summary": original}}}
+    rubric.apply_weighted_assessment(interview, output)
+    rec = output["recommendation"]
+    assert rec["candidate_analysis"]["dialogue_summary"] == original
+    assert rec["candidate_analysis"]["summary"].startswith("按已确认岗位标准，本轮建议补充关键验证")
+    assert "本人解决生产异常" in rec["decision_adjustment"]["reason"]
+    assert rec["summary"] == rec["ai_recommendation"]["rationale"] == rec["candidate_analysis"]["summary"]
+    assert rec["decision"] == rec["ai_recommendation"]["decision"] == "supplementary_interview"
+
+
 def test_api_draft_activate_recommend_conflict_and_auth(tmp_path):
     app = create_app(database_url=f"sqlite:///{tmp_path / 'api.db'}", settings=Settings(environment="development", provider_mode="mock", recording_dir=tmp_path / "recordings"))
     with TestClient(app) as client:

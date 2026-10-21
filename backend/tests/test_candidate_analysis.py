@@ -83,6 +83,24 @@ def test_insufficient_for_score_still_returns_specific_dialogue_analysis(monkeyp
     assert judgment["decision"] != "reject"
 
 
+@pytest.mark.parametrize("field,refs", [
+    ("evidence_segment_ids", ["a0", "invented"]),
+    ("risk_evidence_segment_ids", ["invented"]),
+    ("evidence_segment_ids", ["a0", "q0"]),
+])
+def test_dialogue_verdict_rejects_partially_fabricated_or_interviewer_basis(monkeypatch, field, refs):
+    service = provider()
+    monkeypatch.setattr(service, "_chat_json", lambda **kw: {**dialogue_result(["a0"]), field: refs})
+    class DB:
+        def get(self, *args):
+            return None
+    with pytest.raises(IntelligenceProviderError) as error:
+        service._assess_free_dialogue(DB(), InterviewRound(round_type="business"),
+            Job(title="工程师", jd_text="本人部署与排障"), rows(1))
+    assert error.value.code == "invalid_response"
+    assert error.value.batch_status["failed_batches"] == 1
+
+
 @pytest.mark.parametrize("decision,expected", [("advance", "advance"), ("reject", "hold")])
 def test_synthesis_can_resolve_batch_disagreement_but_not_invent_rejection(monkeypatch, decision, expected):
     service = provider()

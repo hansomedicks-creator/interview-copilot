@@ -406,10 +406,12 @@ class OpenAICompatibleProvider:
             }
             for item in dimensions
         ]
-        source = source_for_interview(interview, job)
+        # A new round's plan may already carry the application's frozen rubric,
+        # while interview.plan_payload has not been assigned yet.
+        source = (plan.get(SNAPSHOT_KEY) or {}).get("source") or source_for_interview(interview, job)
         question_payload = {
             "candidate_stage": plan.get("preparation_context", {}).get("candidate_stage"),
-            "job_title": job.title, "round_type": interview.round_type,
+            "job_title": source.get("title") or job.title, "round_type": interview.round_type,
             "jd": source["jd_text"], "supplementary_requirements": source.get("supplementary_requirements", ""),
             "resume": resume_reference, "round_dimensions": dimension_payload,
         }
@@ -456,10 +458,8 @@ class OpenAICompatibleProvider:
             item for item in output.get("questions", [])
             if item.get("source") != "resume_jd_match"
         ]
-        # The local planner has already created resume-grounded questions.
-        # A semantic result may replace them only when at least one validated
-        # question survives. Empty/invalid model output must never erase a
-        # useful candidate-specific preparation plan.
+        # Local references are explicitly labelled clues, not semantic questions.
+        # Keep them available when generation cannot produce a validated probe.
         selected_questions = questions or existing_resume_questions
         combined = [*retained, *selected_questions]
         output["questions"] = combined
@@ -1261,13 +1261,15 @@ class OpenAICompatibleProvider:
                 failed += 1
                 last_error = error
                 continue
-            referenced = list(
-                dict.fromkeys(
-                    str(value)
-                    for value in output.get("evidence_segment_ids", [])
-                    if str(value) in batch_candidate_ids
-                )
-            )[:8]
+            refs = output.get("evidence_segment_ids")
+            risk_basis = output.get("risk_evidence_segment_ids", [])
+            if (not isinstance(refs, list) or not isinstance(risk_basis, list)
+                    or any(not isinstance(sid, str) or sid not in batch_candidate_ids
+                           for sid in [*refs, *risk_basis])):
+                failed += 1
+                last_error = IntelligenceProviderError("invalid_response", "模型引用无法核验的对话片段")
+                continue
+            referenced = list(dict.fromkeys(refs))[:8]
             try:
                 score = float(output.get("score") or 0) if not output.get("sufficient_evidence") else float(output.get("score"))
                 confidence = float(output.get("confidence", 0))
@@ -1276,7 +1278,7 @@ class OpenAICompatibleProvider:
                 continue
             if not referenced or not 0 <= score <= 5:
                 continue
-            risk_refs = [sid for sid in output.get("risk_evidence_segment_ids", []) if sid in batch_candidate_ids]
+            risk_refs = list(dict.fromkeys(risk_basis))
             proposed_risks = [str(item)[:240] for item in output.get("risks", []) if str(item).strip()][:4]
             # Unverified concerns are unknowns, not observed negative performance.
             unknowns = [str(value)[:240] for value in output.get("unknowns", [])]
@@ -1465,6 +1467,16 @@ class OpenAICompatibleProvider:
             if item.speaker_role == "candidate"
             and is_evidence_worthy_utterance(item.effective_text)
         }
+        existing = list(
+            db.scalars(select(EvidenceItem).where(
+                EvidenceItem.interview_round_id == interview.id
+            )).all()
+        )
+        rejected_keys = {
+            (item.competency_id, sid)
+            for item in existing if item.human_status == "rejected"
+            for sid in item.segment_ids
+        }
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in proposed:
             if not isinstance(item, dict):
@@ -1472,13 +1484,16 @@ class OpenAICompatibleProvider:
             competency_id = str(item.get("competency_id", ""))
             if competency_id not in competency_map:
                 continue
-            referenced = list(
-                dict.fromkeys(
-                    str(value)
-                    for value in item.get("evidence_segment_ids", [])
-                    if str(value) in candidate_segments
-                )
-            )[:6]
+            refs = item.get("evidence_segment_ids")
+            # A score must survive validation with its complete cited basis.
+            # Do not silently drop invented, misattributed or human-rejected
+            # references and then attach the score to unrelated older evidence.
+            if (not isinstance(refs, list) or not refs or any(
+                not isinstance(sid, str) or sid not in candidate_segments
+                or (competency_id, sid) in rejected_keys for sid in refs
+            )):
+                continue
+            referenced = list(dict.fromkeys(refs))
             try:
                 score = float(item.get("score"))
                 confidence = float(item.get("confidence", 0.5))
@@ -1507,13 +1522,6 @@ class OpenAICompatibleProvider:
                 }
             )
 
-        existing = list(
-            db.scalars(
-                select(EvidenceItem).where(
-                    EvidenceItem.interview_round_id == interview.id
-                )
-            ).all()
-        )
         existing_keys = {
             (item.competency_id, segment_id)
             for item in existing
@@ -1566,7 +1574,7 @@ class OpenAICompatibleProvider:
                     strength=round(min(0.9, 0.45 + 0.08 * len(items)), 2),
                     explanation=(
                         "结束后基于本轮全部问答形成的语义证据；不依赖是否使用预设题。"
-                        f" {items[0]['rationale']}"
+                        f" {next(item['rationale'] for item in items if segment_id in item['evidence_segment_ids'])}"
                     )[:500],
                     model_version=self.name,
                     human_status="pending",
@@ -1576,6 +1584,7 @@ class OpenAICompatibleProvider:
                 existing_keys.add((competency_id, segment_id))
             merged_scores[competency_id] = {
                 "score": score,
+                "referenced_segments": set(referenced),
                 "confidence": round(
                     min(0.9, sum(item["confidence"] for item in items) / len(items)),
                     2,
@@ -1596,7 +1605,17 @@ class OpenAICompatibleProvider:
             merged = merged_scores.get(competency_id)
             if not merged:
                 continue
-            related = evidence_by_competency.get(competency_id, [])
+            related = [
+                evidence for evidence in evidence_by_competency.get(competency_id, [])
+                if any(
+                    sid in merged["referenced_segments"]
+                    and evidence.quote in candidate_segments[sid].effective_text
+                    for sid in evidence.segment_ids
+                    if sid in candidate_segments
+                )
+            ]
+            if not related:
+                continue
             confirmed_ids = [
                 evidence.id
                 for evidence in related

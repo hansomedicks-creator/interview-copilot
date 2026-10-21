@@ -2109,13 +2109,13 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         interview, application, candidate, job = _context_or_404(db, interview_id)
         expected_bank = f"{interview.round_type}-standard-v0.1"
         latest_prior_context = prior_round_context(db, interview)
-        if (
+        if interview.status in {"planned", "ready"} and (
             not interview.plan_payload
             or str(interview.plan_payload.get("version", "")).split("-mode-")[0] != "plan-v1.1"
             or interview.plan_payload.get("interview_mode") != interview.interview_mode
             or interview.plan_payload.get("round_type") != interview.round_type
             or interview.plan_payload.get("question_bank_version") != expected_bank
-            or (interview.status == "planned" and interview.plan_payload.get("preparation_policy") != PREPARATION_POLICY)
+            or interview.plan_payload.get("preparation_policy") != PREPARATION_POLICY
             or (
                 interview.status == "planned"
                 and interview.plan_payload.get("semantic_question_assistance", {}).get("status") == "active"
@@ -2126,11 +2126,18 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 and interview.plan_payload.get("prior_round_context") != latest_prior_context
             )
         ):
-            interview.plan_payload = _build_interview_plan(
+            plan = _build_interview_plan(
                 db, request.app.state.intelligence, interview, job
             )
-            interview.plan_version = interview.plan_payload["version"]
-            db.commit()
+            changed = db.execute(update(InterviewRound).where(
+                InterviewRound.id == interview_id,
+                InterviewRound.status.in_(["planned", "ready"]),
+            ).values(plan_payload=plan, plan_version=plan["version"]))
+            if changed.rowcount:
+                db.commit()
+            else:
+                db.rollback()
+            db.refresh(interview)
         sibling_rounds = db.scalars(
             select(InterviewRound)
             .where(InterviewRound.application_id == application.id)

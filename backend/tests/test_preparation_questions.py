@@ -89,7 +89,8 @@ def test_dimension_scoring_and_final_review_receive_same_frozen_jd(monkeypatch):
         seen.append(kw)
         assert kw["payload"]["jd_reference"] == JD
         assert kw["payload"]["supplementary_requirements"] == "不设置下属，需本人处理"
-        return {"competency_assessments": []} if kw["schema_name"] == "full_conversation_competency_assessment" else {}
+        return ({"competency_assessments": []} if kw["schema_name"] == "full_conversation_competency_assessment"
+                else {"evidence_segment_ids": [], "risk_evidence_segment_ids": [], "sufficient_evidence": False})
     monkeypatch.setattr(service, "_chat_json", fake)
     rows = [segment("q", "interviewer", "你怎么检查租户隔离？"), segment("a", "candidate", RESUME)]
     service._assess_full_conversation(interview, job, [], rows)
@@ -206,3 +207,78 @@ def test_refresh_does_not_overwrite_when_another_browser_starts_during_generatio
             row = db.get(InterviewRound, rid)
             assert row.status == 'in_progress'
             assert row.plan_payload == original_plan
+
+
+def test_opening_legacy_plan_cannot_overwrite_a_concurrently_started_interview(tmp_path, monkeypatch):
+    import app.main as main_module
+    from test_api import make_client, bootstrap
+    with make_client(tmp_path) as client:
+        rid = bootstrap(client)["active_interview_id"]
+        with client.app.state.database.session_factory() as db:
+            row = db.get(InterviewRound, rid)
+            original_plan = {**row.plan_payload, "preparation_policy": "legacy"}
+            row.plan_payload = original_plan
+            db.commit()
+        original = main_module._build_interview_plan
+        def race(db, intelligence, interview, job):
+            result = original(db, intelligence, interview, job)
+            with client.app.state.database.session_factory() as other:
+                other.get(InterviewRound, rid).status = "in_progress"
+                other.commit()
+            return {**result, "must_not_be_saved": True}
+        monkeypatch.setattr(main_module, "_build_interview_plan", race)
+        result = client.get(f"/api/v1/interviews/{rid}")
+        assert result.status_code == 200
+        assert result.json()["interview"]["plan_payload"] == original_plan
+        assert result.json()["interview"]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize("phase", ["in_progress", "completed"])
+def test_opening_old_version_never_rebuilds_started_or_completed_plan(tmp_path, monkeypatch, phase):
+    import app.main as main_module
+    from test_api import make_client, bootstrap
+    with make_client(tmp_path) as client:
+        rid = bootstrap(client)["active_interview_id"]
+        legacy = {"version": "older-version", "questions": []}
+        with client.app.state.database.session_factory() as db:
+            row = db.get(InterviewRound, rid)
+            row.status, row.plan_payload = phase, legacy
+            db.commit()
+        monkeypatch.setattr(main_module, "_build_interview_plan", lambda *args: pytest.fail("must preserve history"))
+        assert client.get(f"/api/v1/interviews/{rid}").json()["interview"]["plan_payload"] == legacy
+
+
+@pytest.mark.parametrize("invalid_basis", ["rejected", "invented", "interviewer"])
+def test_scoring_cannot_reuse_other_evidence_when_model_basis_is_invalid(tmp_path, invalid_basis):
+    from app.models import EvidenceItem
+    from scripts.evaluate_job_readiness import synthetic_case
+    from app.services.evaluation_scope import round_evaluation_dimensions
+    database = Database(f"sqlite:///{tmp_path / 'evidence.db'}")
+    database.create_all()
+    cases = json.loads((Path(__file__).parent / "fixtures/job_readiness_cases.json").read_text(encoding="utf-8"))["cases"]
+    service = OpenAICompatibleProvider(Settings(llm_api_key="synthetic", llm_model="synthetic"))
+    try:
+        with database.session_factory() as db:
+            interview, job = synthetic_case(db, cases[2], {c["id"]: c for c in cases})
+            dims = round_evaluation_dimensions(db, interview, job)
+            cid = dims[0]["id"]
+            rows = service._segments(db, interview.id, limit=None)
+            answers = [r for r in rows if r.speaker_role == "candidate"]
+            # Older accepted evidence must not launder a new rejected citation.
+            for i, answer in enumerate(answers[:2]):
+                db.add(EvidenceItem(id=f"old-{i}", interview_round_id=interview.id,
+                    competency_id=cid, segment_ids=[answer.id], quote=answer.effective_text,
+                    direction="support", strength=.8, explanation="本人解释具体排查做法",
+                    model_version="synthetic", human_status="rejected" if i == 0 else "confirmed"))
+            db.flush()
+            invalid = {"rejected": answers[0].id, "invented": "invented",
+                       "interviewer": next(r.id for r in rows if r.speaker_role == "interviewer")}[invalid_basis]
+            baseline = {"ai_scores": [{"competency_id": cid, "score": None, "evidence_ids": []}]}
+            service._apply_conversation_assessments(db, interview, dims, rows, [{
+                "competency_id": cid, "score": 5, "confidence": .9, "direction": "support",
+                "rationale": "本人解释具体排查顺序，符合岗位要求", "evidence_segment_ids": [answers[-1].id, invalid],
+            }], baseline)
+            assert baseline["ai_scores"][0]["score"] is None
+            assert baseline["ai_scores"][0]["evidence_ids"] == []
+    finally:
+        database.engine.dispose()

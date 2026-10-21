@@ -181,6 +181,24 @@ def apply_weighted_assessment(interview: InterviewRound, draft: dict) -> None:
     ai["overall_score"] = weighted["score"]
     # A good score on one easy item must not imply overall readiness.
     if ai.get("decision") == "advance" and (weighted["missing_critical"] or weighted["weak_critical"] or not weighted["observed_weight"]):
+        reasons = []
+        if weighted["missing_critical"]:
+            reasons.append("核心项尚待核实：" + "、".join(weighted["missing_critical"]))
+        if weighted["weak_critical"]:
+            reasons.append("核心项已有低于要求的表现：" + "、".join(weighted["weak_critical"]))
+        if not weighted["observed_weight"]:
+            reasons.append("尚无可核实的岗位加权评分")
+        note = "按已确认岗位标准，本轮建议补充关键验证。" + "；".join(reasons) + "。"
+        rec["decision_adjustment"] = {"from": "advance", "to": "supplementary_interview",
+                                      "reason": note, "source": "confirmed_job_rubric"}
+        report = rec.get("candidate_analysis")
+        original = report.get("summary", "") if report else ai.get("rationale", "")
+        summary = note + ("以下保留对话模型的原始观察（不作为最终通过结论）：" + original if original else "")
+        if report:
+            report["dialogue_summary"] = original
+            report["summary"] = summary
+        ai["rationale"] = summary
+        rec["summary"] = summary
         ai.update(decision="supplementary_interview", label="建议补充关键验证（加权证据尚不完整）")
         rec["decision"] = ai["decision"]
     ai.update(human_confirmation_required=True, candidate_stage_changed=False)
@@ -199,6 +217,6 @@ def compact_rubric(interview: InterviewRound) -> list[dict]:
 def work_context(interview: InterviewRound, job: Job) -> dict:
     """Same authoritative requirements for dimension scoring and the final review."""
     source = source_for_interview(interview, job)
-    return {"jd_reference": source["jd_text"],
+    return {"job_title": source.get("title") or job.title, "jd_reference": source["jd_text"],
             "supplementary_requirements": source.get("supplementary_requirements", ""),
             "confirmed_job_criteria": compact_rubric(interview)}
