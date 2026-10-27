@@ -1488,12 +1488,17 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                         **job.semantic_profile,
                         "interview_flow": previous_flow,
                     }
+            # Persist FK parents before adding the application. These models have
+            # no ORM relationships to order their inserts. Flush is not commit:
+            # a later planning/assignment failure still rolls the whole task back.
+            db.add(candidate)
+            db.flush()
             application = Application(
                 id=new_id("app"), candidate_id=candidate.id, job_id=job.id,
                 current_stage=_stage_for_round(payload.rounds[0].round_type),
                 screening_payload={key: value for key, value in payload.screening_payload.items() if key != job_assessment.SNAPSHOT_KEY},
             )
-            db.add_all([candidate, application])
+            db.add(application)
         db.flush()
 
         configured_order = [item.round_type for item in payload.rounds]
