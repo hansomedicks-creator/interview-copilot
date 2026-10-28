@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from difflib import SequenceMatcher
 import json
+import logging
 import re
 from threading import Lock
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -63,6 +65,8 @@ LIVE_EVIDENCE_GAPS = {
     "other",
 }
 FORBIDDEN_DECISION_TERMS = ("建议录用", "建议淘汰", "应该录用", "应该淘汰", "不予录用", "阶段变更")
+logger = logging.getLogger(__name__)
+LIVE_STATUS_KEY = "live_semantic_status"
 
 
 class IntelligenceProviderError(RuntimeError):
@@ -107,32 +111,24 @@ class OpenAICompatibleProvider:
         # In production, deterministic rules provide coverage and a safe fallback,
         # but they must not persist keyword-only evidence before semantic review.
         baseline = self.fallback.analyze_live(db, interview, job)
+        baseline["suggestions"] = []
+        baseline["suggestion_policy"] = "semantic_only"
         if not latest_segment or latest_segment.speaker_role != "candidate":
             # Keep subtitles responsive without publishing a template question
             # before semantic analysis has understood the answer.
-            baseline["suggestions"] = []
-            baseline["availability"] = "semantic_analysis_pending"
-            return self._with_status(baseline, "ready")
+            return self._live_pending(baseline, interview)
 
         segments = self._segments(db, interview.id)
         answer_context = _current_candidate_answer_context(segments, baseline)
         if answer_context["character_count"] < 10:
-            baseline["suggestions"] = []
-            baseline["availability"] = "semantic_analysis_pending"
-            return self._with_status(baseline, "ready")
+            return self._live_pending(baseline, interview)
         if not self._should_enrich_live(
             interview.id,
             str(baseline.get("active_question_id") or ((baseline.get("interviewer_turns") or [{}])[-1].get("segment_ids") or ["conversation"])[0]),
             int(answer_context["character_count"]),
         ):
-            # Between semantic refreshes, keep a stable local shallow-answer
-            # prompt instead of clearing the right panel on every ASR fragment.
-            baseline["availability"] = (
-                "local_followup_ready"
-                if baseline.get("suggestions")
-                else "semantic_analysis_pending"
-            )
-            return self._with_status(baseline, "ready")
+            # History retains validated cards; never substitute local templates.
+            return self._live_pending(baseline, interview)
         application = db.get(Application, interview.application_id)
         candidate = db.get(Candidate, application.candidate_id) if application else None
         conversation_mode = interview.interview_mode == "conversation"
@@ -179,8 +175,11 @@ class OpenAICompatibleProvider:
             "latest_segment_id": latest_segment.id,
             "current_answer_context": answer_context,
             "interviewer_logical_turn": current_turn,
-            "pending_suggestions": [item for item in (interview.suggestion_history or []) if item.get("status") == "active"],
+            "pending_suggestions": [item for item in (interview.suggestion_history or [])
+                if item.get("status") == "active" and item.get("source") == "llm_semantic_evidence_gap"
+                and item.get("question_id") == answer_context.get("question_id")],
         }
+        started = perf_counter()
         try:
             output = self._chat_json(
                 instructions=(
@@ -203,6 +202,7 @@ class OpenAICompatibleProvider:
                     "如果候选人声称工具已经上线、自动运行或可供他人使用，且该主张影响岗位判断，应优先从权限与数据安全、稳定性、持久化、并发、监控或故障恢复中选择一个最关键的生产化边界当场核实；不要罗列检查清单。"
                     "每条建议必须绑定输入中的 question_id、competency_id 和 candidate 片段，basis_quote 必须逐字复制连续原文。"
                     "追问必须直接承接 basis_quote 的具体含义，不能只根据能力缺口生成一条与回答无关的通用问题。"
+                    "不要问‘其中最关键的一步是怎么运作的’这类可套在任何回答上的问题。应点出回答中具体的方案、对象或取舍，询问哪一个尚未解释的判断；若找不到具体疑点，返回空建议。"
                     "answer_summary用10至45字概括候选人的关键意思，保留是谁做的、范围及不确定性，不逐字摘抄，也不加入原话没有的数字、因果或能力判断。"
                     "question只写一个紧接该理解的自然口语追问，抓住决定岗位判断的具体疑点，不再重复引言或长篇原话；系统会以‘我理解你的意思是：概括。追问’呈现。"
                     "概括是待候选人确认的理解，不是引用，不要加引号。basis_quote单独保存原话供核对，不能用概括替换。"
@@ -217,6 +217,11 @@ class OpenAICompatibleProvider:
                 schema_name="interview_live_assistance",
                 schema=_live_schema(),
             )
+            if (not isinstance(output.get("suggestions"), list)
+                or not isinstance(output.get("evidence"), list)
+                or not isinstance(output.get("transcript_corrections", []), list)
+                or not isinstance(output.get("resolved_suggestions", []), list)):
+                raise IntelligenceProviderError("invalid_response", "实时分析返回结构无效")
             transcript_corrections = self._apply_validated_transcript_corrections(
                 segments, output.get("transcript_corrections", [])
             )
@@ -257,15 +262,56 @@ class OpenAICompatibleProvider:
                 and set(item.get("evidence_segment_ids") or []) - set(old_by_id[item["suggestion_id"]].get("evidence_segment_ids") or [])]
             refreshed["transcript_corrections"] = transcript_corrections
             self._reset_live_failures(interview.id)
-            return self._with_status(refreshed, "active")
+            return self._finish_live(refreshed, interview, started, "active")
         except IntelligenceProviderError as error:
-            degraded = self.fallback.analyze_live(db, interview, job, latest_segment)
+            # Do not pass latest_segment to rules: that writes keyword-only
+            # evidence even though the semantic request has failed.
             failures = self._record_live_failure(interview.id)
-            return self._degraded(
-                degraded,
-                error,
-                status="recovering" if failures < 3 else "degraded",
+            return self._finish_live(
+                baseline, interview, started,
+                "recovering" if failures < 3 else "degraded", error.code, failures,
             )
+
+    def _live_pending(self, payload: dict[str, Any], interview: InterviewRound) -> dict[str, Any]:
+        """A local refresh is not proof that a failed remote request recovered."""
+        previous = dict((interview.plan_payload or {}).get(LIVE_STATUS_KEY) or {})
+        status = previous.get("status", "ready")
+        payload = self._with_status(payload, status)
+        if previous:
+            payload["model_assistance"] = previous
+        failed = status in {"recovering", "degraded"}
+        payload["mode"] = "degraded" if failed else "production"
+        already_analyzed = (
+            status == "active"
+            and previous.get("question_id") == payload.get("active_question_id")
+            and previous.get("transcript_segment_count") == payload.get("transcript_segment_count", 0)
+        )
+        payload["availability"] = (
+            "semantic_unavailable" if failed else
+            "semantic_ready" if already_analyzed else "semantic_analysis_pending"
+        )
+        return payload
+
+    def _finish_live(
+        self, payload: dict[str, Any], interview: InterviewRound, started: float,
+        status: str, error_code: str | None = None, failures: int = 0,
+    ) -> dict[str, Any]:
+        # Only diagnostic metadata is persisted/logged: never transcripts,
+        # candidate names, prompts, credentials or raw upstream error bodies.
+        metadata = {**self._status(status, error_code), "operation": "live",
+            "checked_at": utc_now().isoformat(),
+            "elapsed_ms": max(0, round((perf_counter() - started) * 1000)),
+            "consecutive_failures": failures,
+            "question_id": payload.get("active_question_id"),
+            "transcript_segment_count": payload.get("transcript_segment_count", 0)}
+        interview.plan_payload = {**(interview.plan_payload or {}), LIVE_STATUS_KEY: metadata}
+        payload.update(provider=self.name, mode="degraded" if error_code else "production",
+            suggestion_policy="semantic_only", model_assistance=metadata,
+            availability="semantic_unavailable" if error_code else "semantic_ready")
+        logger.log(logging.WARNING if error_code else logging.INFO,
+            "live_semantic interview=%s status=%s error_code=%s elapsed_ms=%s consecutive_failures=%s",
+            interview.id, status, error_code or "none", metadata["elapsed_ms"], failures)
+        return payload
 
     def _should_enrich_live(
         self,
@@ -1816,6 +1862,8 @@ class OpenAICompatibleProvider:
         context_text = str((answer_context or {}).get("text", ""))
         output: list[dict[str, Any]] = []
         generic_templates = (
+            "最关键的一步是怎么运作",
+            "最关键的一步怎么运作",
             "最后具体",
             "什么结果",
             "你本人具体",
@@ -1857,6 +1905,10 @@ class OpenAICompatibleProvider:
                 or not source_segment
                 or not evidence_quote
                 or not quote_is_traceable
+                or (answer_context is not None and (
+                    question_id != answer_context.get("question_id")
+                    or basis_segment_id not in context_segment_ids
+                ))
                 or not question
                 or not reason
                 or not _gap_matches_context(
@@ -2093,7 +2145,7 @@ def _live_question_context(
                 "question_id": question_id,
                 "competency_id": str(state.get("competency_id") or "interviewer_ad_hoc"),
                 "question": state.get("question", ""),
-                "planned_follow_up": "请补充本人行动、结果或一个能被核实的细节。",
+                "planned_follow_up": "",
                 "source": "interviewer_ad_hoc",
                 "required": False,
                 "is_current": question_id == active_id,

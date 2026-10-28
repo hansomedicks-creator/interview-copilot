@@ -15,12 +15,19 @@ def merge_suggestion_history(
     now = utc_now().isoformat()
     current_ids: list[str] = []
     active_question = analysis.get("active_question_id")
+    semantic_only = analysis.get("suggestion_policy") == "semantic_only"
+
+    def visible(item: dict[str, Any]) -> bool:
+        return not semantic_only or item.get("source") == "llm_semantic_evidence_gap"
+
     for item in history:
         if item.get("status") == "active" and item["id"] in analysis.get("resolved_suggestion_ids", []):
             item.update(status="resolved", resolved_at=now, is_current=False)
         if item.get("question_id") != active_question:
             item["is_current"] = False
     for suggestion in list(analysis.get("suggestions", []))[:6]:
+        if not visible(suggestion):
+            continue
         key = _dedupe_key(suggestion)
         existing = by_key.get(key)
         if existing:
@@ -82,7 +89,7 @@ def merge_suggestion_history(
         history.append(item)
         by_key[key] = item
         current_ids.append(item["id"])
-    active_items = [item for item in reversed(history) if item.get("status") == "active"]
+    active_items = [item for item in reversed(history) if item.get("status") == "active" and visible(item)]
     active_items.sort(
         key=lambda item: (
             bool(active_question and item.get("question_id") == active_question),
@@ -94,7 +101,9 @@ def merge_suggestion_history(
     for item in history:
         item["is_current"] = item is current
     interview.suggestion_history = history
-    analysis["suggestion_history"] = sorted(reversed(history), key=lambda item: (
+    # Legacy local cards remain stored for audit but are not offered as semantic
+    # suggestions in production, including when their dedupe key differs.
+    analysis["suggestion_history"] = sorted((item for item in reversed(history) if visible(item)), key=lambda item: (
         str(item.get("last_seen_at") or ""), str(item.get("created_at") or "")
     ), reverse=True)
     analysis["current_suggestion_ids"] = [current["id"]] if current else []

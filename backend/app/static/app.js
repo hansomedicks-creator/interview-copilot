@@ -154,6 +154,32 @@ async function checkHealth() {
   }
 }
 
+function semanticFailureReason(llm = {}) {
+  const reasons = {
+    connection_error: "模型网络连接失败",
+    timeout: "模型响应超时",
+    output_truncated: "模型输出未完成",
+    upstream_error: "模型服务返回异常",
+    insufficient_balance: "模型账户余额不足，请管理员检查充值",
+    authentication_error: "模型密钥无效或权限不足，请管理员检查配置",
+    rate_limited: "模型请求被限流",
+    invalid_response: "模型返回格式无效",
+    context_overflow: "分析内容超出模型上下文预算",
+  };
+  return reasons[llm.error_code] || "模型请求失败，原因尚未确认";
+}
+
+function liveFollowupNotice(analysis = {}) {
+  const llm = analysis.model_assistance || {};
+  if (analysis.availability === "semantic_unavailable") {
+    return `${semanticFailureReason(llm)}。本次未生成新追问，不用模板替代；已有建议仅供参考，后续回答会再次尝试分析。此状态不代表录音或转写故障。`;
+  }
+  if (analysis.availability === "semantic_analysis_pending") {
+    return "等待当前回答的语义分析；已有建议保持不变，没有具体疑点就不生成新追问。";
+  }
+  return "";
+}
+
 function renderLlmStatus(llm = {}) {
   const badge = $("llm-badge");
   const status = llm.status || "mock_rules";
@@ -161,35 +187,25 @@ function renderLlmStatus(llm = {}) {
   badge.className = `pill ${healthy ? "ready" : status === "degraded" ? "degraded" : "warning"}`;
   badge.classList.toggle("runtime-alert", !healthy && status !== "mock_rules");
   const labels = {
-    ready: "AI 语义分析在线",
+    ready: "AI 已配置 · 待分析",
     active: "AI 语义分析在线",
-    recovering: "AI 语义分析重试中",
-    degraded: "AI 语义暂不可用 · 规则建议继续",
-    fallback: "AI 规则保障中",
+    recovering: "AI 本次分析未完成",
+    degraded: "AI 语义暂不可用",
+    fallback: "AI 本次分析未完成",
     not_configured: "AI 未配置",
     mock_rules: "AI 规则模式",
   };
-  badge.textContent = labels[status] || "AI 规则保障中";
+  badge.textContent = `${labels[status] || "AI 状态待确认"}${llm.error_code ? ` · ${semanticFailureReason(llm)}` : ""}`;
   const explanations = {
-    ready: "语义模型在线；本地规则同时作为安全保障。",
-    active: "语义模型已理解最新回答并参与追问与证据分析。",
-    recovering: "单次模型请求超时或服务波动，系统正在重试。实时字幕、录音和本地浅答提醒不受影响。",
-    degraded: "连续多次语义请求失败。实时字幕、录音和本地追问仍继续，但语义理解、证据提取与建议精度会暂时降低。",
-    fallback: "语义模型暂不可用，当前由本地规则继续保障基本追问。",
+    ready: "模型配置已就绪；不代表最新回答已完成语义分析。",
+    active: "最近一次语义请求成功；当前回答的分析进度请查看追问面板。",
+    recovering: "最近一次模型分析失败。实时追问不会以规则模板替代，后续回答会再次尝试；录音和转写状态请分别查看。",
+    degraded: "连续多次语义请求失败，本次无法新增语义追问与证据。已有建议仍可参考；面后报告需单独确认生成状态。",
+    fallback: "本次模型分析未完成，不能视为已完成语义判断。",
     not_configured: "尚未配置语义模型；字幕与录音可以工作，但追问主要来自本地规则。",
     mock_rules: "当前使用本地规则分析，未调用真实语义模型。",
   };
-  const errorLabels = {
-    connection_error: "模型网络连接失败",
-    timeout: "模型响应超时",
-    output_truncated: "模型输出未完成",
-    upstream_error: "模型鉴权、余额、限流或上游服务异常",
-    insufficient_balance: "模型账户余额不足",
-    authentication_error: "模型密钥无效或权限不足",
-    rate_limited: "模型请求过于频繁",
-    invalid_response: "模型返回为空或未通过结构化校验",
-  };
-  badge.title = `${explanations[status] || explanations.fallback}${llm.error_code ? ` 原因类型：${errorLabels[llm.error_code] || llm.error_code}。` : ""}`;
+  badge.title = `${explanations[status] || explanations.fallback}${llm.error_code ? ` 原因：${semanticFailureReason(llm)}。` : ""}${Number.isFinite(llm.elapsed_ms) ? ` 最近请求耗时：${(llm.elapsed_ms / 1000).toFixed(1)} 秒。` : ""}${llm.consecutive_failures ? ` 连续失败：${llm.consecutive_failures} 次。` : ""}`;
 }
 
 function activateUser(user) {
@@ -3071,6 +3087,9 @@ async function refreshLiveState() {
 
 function renderAnalysis(analysis) {
   if (analysis.model_assistance) renderLlmStatus(analysis.model_assistance);
+  const followupNotice = state.interview?.status === "in_progress" ? liveFollowupNotice(analysis) : "";
+  $("followup-status").textContent = followupNotice;
+  $("followup-status").classList.toggle("hidden", !followupNotice);
   (analysis.transcript_corrections || []).forEach((item) => {
     const row = document.querySelector(`[data-segment-id="${CSS.escape(item.segment_id)}"]`);
     if (!row) return;

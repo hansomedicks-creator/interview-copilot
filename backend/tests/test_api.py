@@ -1085,11 +1085,13 @@ def test_live_semantic_analysis_uses_company_behavior_rubric_without_keyword_dep
         assert prompt["company_policy"]["red_lines"]
 
         latest = next(item for item in prompt["transcript"] if item["segment_id"] == prompt["latest_segment_id"])
-        company_question = next(item for item in prompt["questions"] if item["competency_id"] == "company.ownership")
+        # Company standards inform analysis, but the follow-up must stay on the
+        # actual current question, not jump to a different planned rubric item.
+        current_question = next(item for item in prompt["questions"] if item["is_current"])
         output = {
             "suggestions": [{
-                "question_id": company_question["question_id"],
-                "competency_id": "company.ownership",
+                "question_id": current_question["question_id"],
+                "competency_id": current_question["competency_id"],
                 "evidence_gap": "reflection",
                 "basis_segment_id": latest["segment_id"],
                 "basis_quote": "把延期缩短了两周",
@@ -1151,14 +1153,14 @@ def test_live_semantic_analysis_uses_company_behavior_rubric_without_keyword_dep
 
         suggestion = analysis["suggestions"][0]
         assert suggestion["source"] == "llm_semantic_evidence_gap"
-        assert suggestion["competency_id"] == "company.ownership"
+        assert suggestion["question_id"] == analysis["active_question_id"]
         assert suggestion["evidence_gap"] == "reflection"
         assert suggestion["basis_quote"] == "把延期缩短了两周"
         assert next(item for item in analysis["coverage"] if item["competency_id"] == "company.ownership")["status"] == "mentioned"
         assert any(item["competency_id"] == "company.ownership" for item in analysis["evidence"])
 
 
-def test_production_llm_failure_degrades_to_rules_without_breaking_live_interview(tmp_path):
+def test_production_llm_failure_does_not_invent_followups_or_evidence(tmp_path):
     from app.config import Settings
 
     settings = Settings(
@@ -1200,11 +1202,17 @@ def test_production_llm_failure_degrades_to_rules_without_breaking_live_intervie
         assert analysis["mode"] == "degraded"
         assert analysis["model_assistance"]["fallback_provider"] == "mock-rules-v0.1"
         assert analysis["model_assistance"]["error_code"] == "upstream_error"
-        # Semantic analysis is unavailable, but the local evidence-linked
-        # shallow-answer prompt remains usable instead of leaving the panel blank.
-        assert analysis["suggestions"]
+        # Recording/transcript handling continues; no template or keyword-only
+        # evidence is substituted for a failed semantic request.
+        assert analysis["suggestions"] == []
         assert analysis["coverage"]
-        assert analysis["evidence"]
+        assert analysis["evidence"] == []
+        assert analysis["suggestion_history"] == []
+        assert analysis["availability"] == "semantic_unavailable"
+        assert analysis["model_assistance"]["consecutive_failures"] == 3
+        refreshed = client.get(f"/api/v1/interviews/{interview_id}/live-state").json()
+        assert refreshed["model_assistance"]["error_code"] == "upstream_error"
+        assert refreshed["model_assistance"]["status"] == "degraded"
 
 
 def test_streaming_fragments_are_joined_before_semantic_follow_up(tmp_path):
