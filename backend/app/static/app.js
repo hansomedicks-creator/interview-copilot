@@ -420,15 +420,26 @@ function presetTaskSchedule() {
 
 async function loadAssignableUsers() {
   state.assignableUsers = await api("/api/v1/admin/users");
-  const preferredUser = (roundType) => {
-    if (roundType === "hr") return state.assignableUsers.find((user) => ["hr", "admin"].includes(user.role));
-    if (roundType === "ceo") return state.assignableUsers.find((user) => /CEO|总裁|总经理|董事长|创始人|陈总|总$/.test(user.display_name));
-    return state.assignableUsers.find((user) => user.role === "interviewer" && !/CEO|总裁|总经理|董事长|创始人|总$/.test(user.display_name));
-  };
   ["business", "hr", "ceo"].forEach((roundType) => {
-    const selected = preferredUser(roundType)?.open_id || state.assignableUsers[0]?.open_id;
-    $("task-form").elements[`${roundType}_interviewer`].innerHTML = state.assignableUsers.map((user) => `<option value="${escapeHtml(user.open_id)}" ${user.open_id === selected ? "selected" : ""}>${escapeHtml(user.display_name)} · ${escapeHtml(user.role)}</option>`).join("");
+    const select = $("task-form").elements[`${roundType}_interviewer`];
+    const selected = select.value;
+    select.innerHTML = '<option value="">请选择本轮面试官</option>' + state.assignableUsers.map((user) => {
+      const duplicate = state.assignableUsers.filter(item => item.display_name === user.display_name).length > 1;
+      return `<option value="${escapeHtml(user.open_id)}" ${user.open_id === selected ? "selected" : ""}>${escapeHtml(user.display_name)}${duplicate ? ` · ${escapeHtml(user.open_id.slice(-6))}` : ""}</option>`;
+    }).join("");
   });
+}
+
+async function syncFeishuInterviewers() {
+  const button = $("sync-feishu-users");
+  button.disabled = true;
+  $("directory-status").textContent = "正在同步公司通讯录…";
+  try {
+    const result = await api("/api/v1/admin/users/sync-feishu", { method: "POST" });
+    await loadAssignableUsers();
+    $("directory-status").textContent = `${result.message} 新增 ${result.added} 人，更新 ${result.updated} 人。`;
+  } catch (error) { $("directory-status").textContent = error.message; }
+  finally { button.disabled = false; }
 }
 
 async function openTaskCreator() {
@@ -3656,6 +3667,7 @@ window.addEventListener("resize", repositionTaskActionMenus);
 window.addEventListener("scroll", repositionTaskActionMenus, true);
 document.querySelectorAll("[data-dev-login]").forEach((button) => button.addEventListener("click", () => devLogin(button.dataset.devLogin)));
 $("task-form").addEventListener("submit", createInterviewTask);
+$("sync-feishu-users").addEventListener("click", syncFeishuInterviewers);
 document.querySelectorAll("#task-form [data-round-enabled]").forEach((checkbox) => checkbox.addEventListener("change", updateTaskRoundFlow));
 document.querySelectorAll("#task-form [data-round-move]").forEach((button) => button.addEventListener("click", () => moveTaskRound(button.closest("[data-round-form]"), button.dataset.roundMove)));
 $("resume-file").addEventListener("change", () => importDocument("resume-file", "resume_text"));

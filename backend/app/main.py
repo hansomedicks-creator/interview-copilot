@@ -60,6 +60,7 @@ from .models import (
 )
 from .providers import create_intelligence_provider
 from .providers.feishu_notifications import FeishuNotificationSender
+from .providers.feishu_directory import FeishuDirectory, FeishuDirectoryError
 from .schemas import (
     AdminJobSave,
     AssessmentDraftSave,
@@ -1549,6 +1550,28 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 "round_count": len(configured_order),
             },
         }
+
+    @app.post("/api/v1/admin/users/sync-feishu")
+    def sync_feishu_users(request: Request, db: Session = Depends(get_db)) -> dict:
+        _require_role(request, "hr", "admin")
+        try:
+            employees = FeishuDirectory(request.app.state.notification_sender).list_employees()
+        except FeishuDirectoryError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from None
+        added = updated = 0
+        for employee in employees:
+            identity = db.scalar(select(UserIdentity).where(UserIdentity.open_id == employee["open_id"]))
+            if identity:
+                identity.display_name = employee["name"]
+                if employee["unavailable"]:
+                    identity.active = False
+                # Never promote roles or re-enable an account disabled by an administrator.
+                updated += 1
+            elif not employee["unavailable"]:
+                db.add(UserIdentity(id=new_id("user"), open_id=employee["open_id"], display_name=employee["name"], identity_source="feishu", role="interviewer", active=True))
+                added += 1
+        db.commit()
+        return {"added": added, "updated": updated, "message": "已同步当前飞书应用所在公司的通讯录；各轮面试官请分别选择。"}
 
     @app.get("/api/v1/admin/users")
     def list_assignable_users(
