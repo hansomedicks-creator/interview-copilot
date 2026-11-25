@@ -471,6 +471,7 @@ class CompanyProfileDraftSave(BaseModel):
     profile_purpose: str = Field(min_length=10, max_length=1000)
     competencies: list[CompanyProfileCompetencyInput] = Field(min_length=3, max_length=8)
     red_lines: list[str] = Field(default_factory=list, max_length=10)
+    hr_question_principles: list[str] = Field(default_factory=list, max_length=12)
     change_summary: str = Field(min_length=5, max_length=1000)
 
     @model_validator(mode="after")
@@ -479,6 +480,9 @@ class CompanyProfileDraftSave(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("company competency names must be unique")
         self.red_lines = list(dict.fromkeys(item.strip() for item in self.red_lines if item.strip()))
+        self.hr_question_principles = list(dict.fromkeys(item.strip() for item in self.hr_question_principles if item.strip()))
+        if any(len(item) > 500 for item in self.hr_question_principles):
+            raise ValueError("each HR question principle must be at most 500 characters")
         return self
 
 

@@ -161,7 +161,7 @@ def test_refresh_preparation_only_before_start_and_keeps_optional_questions(tmp_
         result = client.post(f'/api/v1/interviews/{rid}/preparation/refresh')
         assert result.status_code == 200
         plan = result.json()['plan_payload']
-        assert plan['preparation_policy'] == 'experience-role-probes-v2'
+        assert plan['preparation_policy'] == 'experience-role-probes-v3'
         assert all(not q['required'] for q in plan['questions'] if q.get('source') == 'resume_jd_match')
         acknowledge_and_start(client, rid)
         assert client.post(f'/api/v1/interviews/{rid}/preparation/refresh').status_code == 409

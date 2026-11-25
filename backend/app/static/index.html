@@ -270,6 +270,8 @@
             <div class="company-profile-basics">
               <label>公司名称<input id="company-profile-name" maxlength="128" required placeholder="例如：XX科技" /></label>
               <label>画像用途说明<textarea id="company-profile-purpose" rows="3" required placeholder="说明这套公司通用标准希望解决什么问题"></textarea></label>
+              <label>HR 提问原则（可选，每行一条）<textarea id="company-hr-principles" rows="5" placeholder="围绕真实经历理解判断依据，不是每人必答的清单"></textarea></label>
+              <label class="secondary">导入画像草稿 JSON<input id="company-profile-import" type="file" accept=".json" /><span class="field-hint">仅填入编辑区，核对后保存、审核才会生效。请勿上传原始会议记录或候选人隐私。</span></label>
               <label>公司级红线 <span class="field-hint">每行一条</span><textarea id="company-profile-red-lines" rows="4" placeholder="例如：伪造影响任职判断的关键信息"></textarea></label>
               <label>本次版本说明<textarea id="company-profile-change-summary" rows="3" required placeholder="例如：根据 HR 用人原则建立首版公司基础画像"></textarea></label>
             </div>
@@ -691,6 +693,6 @@
     </section>
     <script src="/static/resume-preview.js?v=1" defer></script>
     <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
-    <script src="/static/app.js?v=1.4.0-interview-preparation" defer></script>
+    <script src="/static/app.js?v=1.4.1-hr-live-context" defer></script>
   </body>
 </html>

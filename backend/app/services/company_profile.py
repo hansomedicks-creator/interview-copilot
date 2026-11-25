@@ -150,6 +150,7 @@ def save_company_profile_draft(
             for index, item in enumerate(payload.competencies)
         ],
         "red_lines": payload.red_lines,
+        "hr_question_principles": payload.hr_question_principles,
         "anti_bias_boundary": ANTI_BIAS_BOUNDARY,
         "generator_version": "company-profile-v0.1",
         "version_parent": active.version_label if active else None,
@@ -339,6 +340,7 @@ def company_profile_payload_for_publication(version: CompanyProfileVersion) -> d
             for item in profile.get("competencies", [])
         ],
         "risk_signals": profile.get("red_lines", []),
+        "hr_question_principles": profile.get("hr_question_principles", []),
         "evidence_requirements": ["具体情境", "本人行动", "可验证结果", "反思与复盘"],
         "anti_bias_boundary": profile.get("anti_bias_boundary", ANTI_BIAS_BOUNDARY),
         "reason": version.change_summary,

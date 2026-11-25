@@ -223,6 +223,7 @@ function activateUser(user) {
   document.querySelectorAll(".hr-only").forEach((item) => item.classList.toggle("hidden", !["hr", "admin"].includes(user.role)));
   document.querySelectorAll(".interviewer-only").forEach((item) => item.classList.toggle("hidden", user.role !== "interviewer"));
   document.querySelectorAll(".admin-only").forEach((item) => item.classList.toggle("hidden", user.role !== "admin"));
+  $("resume-replace-file").closest("label").classList.toggle("hidden", !["hr", "admin"].includes(user.role));
   const sharedReport = new URLSearchParams(window.location.search).has("report");
   if (["hr", "admin"].includes(user.role) && !sharedReport) {
     openAdminPanel("home").catch((error) => toast(error.message, true));
@@ -1473,6 +1474,7 @@ function renderCompanyProfileCenter() {
 
   $("company-profile-name").value = editor.company_name || "";
   $("company-profile-purpose").value = editor.profile_purpose || "";
+  $("company-hr-principles").value = (editor.hr_question_principles || []).join("\n");
   $("company-profile-red-lines").value = (editor.red_lines || []).join("\n");
   $("company-profile-change-summary").value = draft?.change_summary || (active ? `基于 ${active.version_label} 更新公司通用标准` : "根据 HR 用人原则建立首版公司基础人才画像");
   renderCompanyCompetencyEditor(editor.competencies || []);
@@ -1514,6 +1516,7 @@ async function saveCompanyProfileDraft(event) {
         profile_purpose: profilePurpose,
         competencies: readCompanyCompetencies(true),
         red_lines: companyLines($("company-profile-red-lines").value),
+        hr_question_principles: companyLines($("company-hr-principles").value),
         change_summary: changeSummary,
       }),
     });
@@ -3676,6 +3679,24 @@ window.addEventListener("resize", repositionTaskActionMenus);
 window.addEventListener("scroll", repositionTaskActionMenus, true);
 document.querySelectorAll("[data-dev-login]").forEach((button) => button.addEventListener("click", () => devLogin(button.dataset.devLogin)));
 $("task-form").addEventListener("submit", createInterviewTask);
+$("company-profile-import").addEventListener("change", async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    if (file.size > 100000) throw new Error("画像草稿不能超过 100KB");
+    const draft = JSON.parse(await file.text());
+    if (!Array.isArray(draft.competencies) || draft.competencies.length < 3 || draft.competencies.length > 8 || !draft.company_name || !draft.profile_purpose) throw new Error("不是有效的公司画像草稿");
+    if (!window.confirm("导入会替换当前未保存的编辑内容，不会修改已生效标准。是否继续？")) return;
+    $("company-profile-name").value = draft.company_name;
+    $("company-profile-purpose").value = draft.profile_purpose;
+    $("company-profile-red-lines").value = (draft.red_lines || []).join("\n");
+    $("company-hr-principles").value = (draft.hr_question_principles || []).join("\n");
+    $("company-profile-change-summary").value = draft.change_summary || "导入经人工整理的公司画像草稿";
+    renderCompanyCompetencyEditor(draft.competencies);
+    toast("已填入编辑区，请核对并保存草稿；尚未生效");
+  } catch (error) { toast(error.message, true); }
+  finally { event.target.value = ""; }
+});
 $("resume-preview-btn").addEventListener("click", () => window.resumePreview.open(state.interviewId, $("candidate-name").textContent));
 $("resume-replace-file").addEventListener("change", async event => {
   const file = event.target.files?.[0];

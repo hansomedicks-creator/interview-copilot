@@ -1826,7 +1826,8 @@ def test_student_questions_start_from_matching_resume_experience_not_jd_only(tmp
         plan = created.json()["rounds"][0]["plan_payload"]
         assert plan["preparation_context"]["candidate_stage"] == "student"
         assert len(plan["required_questions"]) == 1
-        assert "课程、比赛、社团、实习或个人项目" in plan["required_questions"][0]["question"]
+        assert "课程项目、实习或自己感兴趣的尝试" in plan["required_questions"][0]["question"]
+        assert "最接近" not in plan["required_questions"][0]["question"]
         matched = [item for item in plan["questions"] if item["source"] == "resume_jd_match"]
         assert matched
         assert all(item["source_evidence"].startswith("简历原文：") for item in matched)

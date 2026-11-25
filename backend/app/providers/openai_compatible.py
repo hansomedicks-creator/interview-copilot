@@ -154,6 +154,7 @@ class OpenAICompatibleProvider:
             "questions": question_context,
             "company_policy": {
                 "profile_version": active_profile.version_label if active_profile else None,
+                "hr_question_principles": (active_profile.profile_payload or {}).get("hr_question_principles", []) if active_profile and interview.round_type == "hr" else [],
                 "red_lines": list((active_profile.profile_payload or {}).get("red_lines", [])) if active_profile else [],
                 "anti_bias_boundary": (active_profile.profile_payload or {}).get("anti_bias_boundary", []) if active_profile else [],
             },
@@ -191,6 +192,9 @@ class OpenAICompatibleProvider:
                     + ("当前是自由对话分析模式：只跟随面试官实际提出的问题，不得匹配、评分或补造任何能力维度。" if conversation_mode else "")
                     + "只有追问能显著改变面试官对候选人的认知时才返回一条建议；没有高价值追问时必须返回空数组。"
                     "优先寻找回答内部矛盾、关键机制、本人判断与团队方案的边界、取舍依据、失败原因、认知上限，以及岗位本质与候选人经历之间的落差。"
+                    "HR轮可参考 company_policy.hr_question_principles，但只追问当前回答中与任职有关的具体疑点，不逐条补问。"
+                    "把抽象追问变成候选人刚提及的对象和条件：例如说靠熟人拓客，就核实没有旧资源时怎样打开新客户；不是泛问关键一步如何运作。示例不是固定问题，不得在无关回答上照搬。"
+                    "专业名词先看是否真正理解并实践，业绩先区分个人与团队、统计口径；未知不是造假，没问到不是能力差。禁止依据家庭、年龄、性别、学校标签或爱好推断岗位能力。"
                     "若当前回答同时存在多个值得核实的缺口，参考confirmed_weight和critical确定优先级；权重不得用于强行切换话题或追问尚未提及的能力。"
                     "‘结果、数字、本人行动’不是每道题都必须补齐。职业规划、兴趣爱好、寒暄、确认信息、候选人反问等回答，禁止套用项目结果或量化指标追问。"
                     "嗯、哦、好的、然后呢等口头语或确认词不是回答、不是证据，也不得作为 basis_quote。"
@@ -461,6 +465,10 @@ class OpenAICompatibleProvider:
             "jd": source["jd_text"], "supplementary_requirements": source.get("supplementary_requirements", ""),
             "resume": resume_reference, "round_dimensions": dimension_payload,
         }
+        company_profile = active_company_profile(db)
+        if company_profile and interview.round_type == "hr":
+            question_payload["hr_question_principles"] = (company_profile.profile_payload or {}).get("hr_question_principles", [])
+            question_payload["company_profile_version"] = company_profile.version_label
         if payload_size(question_payload) > self.settings.llm_max_context_chars:
             return self._replace_resume_plan_questions(plan, [], status="degraded", error_code="context_overflow")
         try:
@@ -1018,6 +1026,8 @@ class OpenAICompatibleProvider:
     def _chat_json(
         self, *, instructions, payload, schema_name, schema, timeout_seconds=None, max_tokens=None, model=None,
     ):
+        if schema_name == "interview_live_assistance":
+            payload = _compact_live_payload(payload, self.settings.llm_max_context_chars)
         has_rubric = bool(payload.get("confirmed_job_criteria")) or any(
             c.get("confirmed_weight") is not None for c in payload.get("competencies", [])
         )
@@ -1064,7 +1074,8 @@ class OpenAICompatibleProvider:
                 },
                 {
                     "role": "user",
-                    "content": _bounded_json(payload, self.settings.llm_max_context_chars),
+                    "content": (json.dumps(payload, ensure_ascii=False) if schema_name == "interview_live_assistance"
+                                else _bounded_json(payload, self.settings.llm_max_context_chars)),
                 },
             ],
             "temperature": 0.1,
@@ -2154,6 +2165,9 @@ def _live_question_context(
                 "rule_detected_missing_dimensions": list(state.get("missing_dimensions", [])),
             },
         )
+    # Ad-hoc turns used to be prepended until the current question fell out of
+    # the final slice on a long interview. Always retain the current question.
+    output.sort(key=lambda item: not item.get("is_current"))
     return output[:12]
 
 
@@ -2176,6 +2190,54 @@ def _gap_matches_context(evidence_gap: str, source_question: str, basis_quote: s
             for marker in ("指标", "数据", "多少", "量化", "提升", "降低", "增长", "转化率", "效率", "成本", "周期", "KPI")
         )
     return True
+
+
+def _compact_live_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Bound live-only context without clipping the current question/answer.
+
+    Full-interview reports continue to use their separate batch review path.
+    Unknown text is never summarized locally or turned into fabricated evidence.
+    """
+    from copy import deepcopy
+    compact = deepcopy(payload)
+    answer = compact.get("current_answer_context") or {}
+    protected = set(answer.get("source_segment_ids") or [])
+    turn = compact.get("interviewer_logical_turn") or {}
+    protected.update(turn.get("segment_ids") or [])
+    protected.add(compact.get("latest_segment_id"))
+    transcript = compact.get("transcript") or []
+    # effective text already carries reviewed corrections; raw text stays in DB.
+    for item in transcript:
+        item.pop("text_raw", None)
+    available_ids = {item.get("segment_id") for item in transcript}
+    if (len(json.dumps(compact, ensure_ascii=False)) > max_chars
+            and answer.get("source_segment_ids")
+            and set(answer.get("source_segment_ids") or []).issubset(available_ids)):
+        answer.pop("text", None)
+        answer["policy"] = "按 source_segment_ids 的顺序合并 transcript 中的候选人原话，理解完整回答；每条引用仍使用原 segment_id。"
+    compact["questions"] = [item for item in compact.get("questions", [])
+                            if item.get("is_current") or item.get("question_id") == answer.get("question_id")]
+    for item in compact["questions"]:
+        item.pop("planned_follow_up", None)
+        item.pop("rule_detected_missing_dimensions", None)
+    compact["pending_suggestions"] = [
+        {key: item[key] for key in ("id", "question_id", "question", "basis_quote", "reason", "evidence_gap") if key in item}
+        for item in compact.get("pending_suggestions", [])
+    ]
+    # Drop older dialogue only, then auxiliary spelling references. Current
+    # answer, current question, confirmed criteria/weights and policy survive.
+    for item in list(transcript):
+        if len(json.dumps(compact, ensure_ascii=False)) <= max_chars:
+            break
+        if item.get("segment_id") not in protected:
+            transcript.remove(item)
+    if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
+        context = compact.get("transcript_correction_context", {})
+        context.pop("resume_reference", None)
+        context.pop("jd_reference", None)
+    if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
+        raise IntelligenceProviderError("context_overflow", "当前完整问答与岗位标准超出实时预算；未截断回答或生成规则追问")
+    return compact
 
 
 def _bounded_json(payload: dict[str, Any], max_chars: int) -> str:

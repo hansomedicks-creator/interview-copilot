@@ -250,7 +250,7 @@ def _spoken_standard_question(
     competency: dict[str, Any], *, candidate_stage: str = "experienced"
 ) -> tuple[str, str]:
     simple = {
-        "domain_expertise": ("挑一件和这个岗位最像的工作讲讲，你当时具体做了什么？", "最后做成了吗？你自己完成的是哪一部分？"),
+        "domain_expertise": ("先聊聊你最近一份工作的主要职责吧。", ""),
         "problem_solving": ("工作里遇到问题时，你通常怎么找到原因？讲一件最近的事。", "你先试了什么，后来为什么换了做法？"),
         "ownership": ("讲一件工作出了问题、最后需要你来处理的事。", "你做了什么补救，最后结果怎么样？"),
         "collaboration": ("讲一件你需要别人配合才能完成的工作。", "对方一开始不配合时，你是怎么沟通的？"),
@@ -267,7 +267,7 @@ def _spoken_standard_question(
     }
     if candidate_stage == "student":
         student = {
-            "domain_expertise": ("从课程、比赛、社团、实习或个人项目里，挑一件和这个岗位最接近的事讲讲。", "其中哪一步最考验你的判断？为什么选择这种做法？"),
+            "domain_expertise": ("最近做过哪些课程项目、实习或自己感兴趣的尝试？选一件你愿意聊的就好。", ""),
             "problem_solving": ("讲一件你在课程、项目或实习里遇到问题的事。", "你怎么找到原因，后来改了哪一步？"),
             "ownership": ("讲一件课程、项目或实习出了问题，而你没有等别人来处理的事。", "你本人做了什么补救，最后怎么样？"),
             "collaboration": ("讲一件你需要同学、队友或实习同事配合才能完成的事。", "对方想法不一样时，你具体怎么沟通？"),
