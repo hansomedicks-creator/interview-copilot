@@ -1796,3 +1796,9 @@ body.role-admin .task-header > div > .kicker { display: none; }
 .preparation-actions { display: flex; align-items: center; gap: 8px; }
 .weighted-assessment th, .weighted-assessment td { padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e5e1ef; }
 @media (max-width: 700px) { .job-assessment-editor { padding: 14px; } .assessment-heading { grid-template-columns: minmax(0, 1fr) 80px; } }
+:root .resume-preview { position: fixed; z-index: 120; right: 12px; top: 70px; width: min(580px, calc(100vw - 24px)); height: min(760px, calc(100vh - 90px)); min-width: min(300px, calc(100vw - 24px)); min-height: 240px; max-width: calc(100vw - 24px); max-height: calc(100vh - 80px); resize: both; overflow: hidden; background: white; border: 1px solid #d9d3eb; border-radius: 12px; box-shadow: 0 8px 30px #1d153b26; display: flex; flex-direction: column; }
+:root .resume-preview.hidden { display: none; }
+.resume-preview header { padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: move; touch-action: none; background: #f6f4ff; }
+.resume-preview header strong { font-size: 16px; }
+.resume-preview p { margin: 8px 14px; font-size: 14px; }
+.resume-preview iframe { flex: 1; min-height: 0; width: 100%; border: 0; }

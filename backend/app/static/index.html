@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.3.3-experience-probes" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.4.0-resume-preview" />
   </head>
   <body>
     <header class="topbar">
@@ -457,7 +457,7 @@
         </div>
 
         <section id="preparation-brief" class="preparation-brief panel">
-          <div class="prep-heading"><div><span class="kicker">PRE-INTERVIEW BRIEF</span><h3>面试前准备包</h3></div><div class="prep-heading-actions"><button id="prep-report-btn" class="secondary compact hidden">查看锁定汇总报告</button><span id="prep-status" class="pill">正在生成</span></div></div>
+          <div class="prep-heading"><div><span class="kicker">PRE-INTERVIEW BRIEF</span><h3>面试前准备包</h3></div><div class="prep-heading-actions"><button id="resume-preview-btn" type="button" class="secondary compact">悬浮查看简历</button><label class="admin-only secondary compact">补传 PDF<input id="resume-replace-file" type="file" accept=".pdf" hidden /></label><button id="prep-report-btn" class="secondary compact hidden">查看锁定汇总报告</button><span id="prep-status" class="pill">正在生成</span></div></div>
           <div class="prep-grid">
             <div><small>简历已识别事实</small><div id="prep-facts" class="prep-chips"></div></div>
             <div><small>岗位重点</small><div id="prep-focus" class="prep-chips"></div></div>
@@ -684,7 +684,13 @@
       </div>
     </dialog>
     <div id="toast" class="toast hidden"></div>
+    <section id="resume-preview" class="resume-preview hidden" role="region" aria-label="PDF 简历悬浮窗口">
+      <header id="resume-preview-handle"><strong id="resume-preview-title">PDF 简历</strong><button id="resume-preview-close" type="button" aria-label="关闭简历">关闭</button></header>
+      <p id="resume-preview-message" role="status"></p>
+      <iframe id="resume-preview-frame" title="候选人 PDF 简历" src="about:blank"></iframe>
+    </section>
+    <script src="/static/resume-preview.js?v=1" defer></script>
     <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
-    <script src="/static/app.js?v=1.3.4-semantic-followups" defer></script>
+    <script src="/static/app.js?v=1.4.0-interview-preparation" defer></script>
   </body>
 </html>

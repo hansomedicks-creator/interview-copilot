@@ -16,6 +16,7 @@ from ..models import (
     AudioRecording,
     AuditEvent,
     Candidate,
+    ResumeDocument,
     EvidenceItem,
     InterviewQuestionProgress,
     InterviewReportVersion,
@@ -282,6 +283,8 @@ def _cleanup_candidate(
         db.delete(recording)
 
     if candidate_expired:
+        for document in db.scalars(select(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id)).all():
+            db.delete(document)
         segments = list(
             db.scalars(select(TranscriptSegment).where(TranscriptSegment.interview_round_id.in_(round_ids))).all()
         ) if round_ids else []

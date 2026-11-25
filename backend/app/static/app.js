@@ -311,6 +311,7 @@ async function devLogin(openId) {
 }
 
 async function logout() {
+  window.resumePreview.close();
   await api("/api/v1/auth/logout", { method: "POST" });
   location.reload();
 }
@@ -1980,6 +1981,12 @@ async function createInterviewTask(event) {
     });
     state.rounds = data.rounds;
     state.interviewId = data.active_interview_id;
+    let pdfWarning = "";
+    const originalPdf = $("resume-file").files?.[0];
+    if (!state.schedulingApplicationId && originalPdf?.name.toLowerCase().endsWith(".pdf")) {
+      try { await window.resumePreview.upload(state.interviewId, originalPdf); }
+      catch (error) { pdfWarning = `任务已创建，但 PDF 未保存：${error.message}。请在准备包补传，不要重复创建任务。`; }
+    }
     form.reset();
     state.schedulingApplicationId = null;
     form.elements.candidate_name.readOnly = false;
@@ -1991,7 +1998,8 @@ async function createInterviewTask(event) {
     $("workspace").classList.remove("hidden");
     await loadTodayInterviews();
     await loadInterview();
-    toast(`已创建 ${data.candidate.display_name} 的 ${data.rounds.length} 轮面试任务`);
+    toast(pdfWarning || `已创建 ${data.candidate.display_name} 的 ${data.rounds.length} 轮面试任务`, Boolean(pdfWarning));
+    if (pdfWarning) { $("directory-status").textContent = pdfWarning; }
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -2567,6 +2575,7 @@ async function cancelManagedRound(event) {
 }
 
 async function loadInterview() {
+  window.resumePreview.close();
   closeSocket();
   const data = await api(`/api/v1/interviews/${state.interviewId}`);
   state.interview = data.interview;
@@ -3667,6 +3676,18 @@ window.addEventListener("resize", repositionTaskActionMenus);
 window.addEventListener("scroll", repositionTaskActionMenus, true);
 document.querySelectorAll("[data-dev-login]").forEach((button) => button.addEventListener("click", () => devLogin(button.dataset.devLogin)));
 $("task-form").addEventListener("submit", createInterviewTask);
+$("resume-preview-btn").addEventListener("click", () => window.resumePreview.open(state.interviewId, $("candidate-name").textContent));
+$("resume-replace-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    if (!window.confirm("将替换当前候选人的 PDF 预览原件，文字简历与已生成问题不会改变。确认是同一位候选人吗？")) return;
+    await window.resumePreview.upload(state.interviewId, file);
+    await window.resumePreview.open(state.interviewId, $("candidate-name").textContent);
+    toast("PDF 原件已保存；文字简历和评分不变");
+  } catch (error) { toast(error.message, true); }
+  finally { event.target.value = ""; }
+});
 $("sync-feishu-users").addEventListener("click", syncFeishuInterviewers);
 document.querySelectorAll("#task-form [data-round-enabled]").forEach((checkbox) => checkbox.addEventListener("change", updateTaskRoundFlow));
 document.querySelectorAll("#task-form [data-round-move]").forEach((button) => button.addEventListener("click", () => moveTaskRound(button.closest("[data-round-form]"), button.dataset.roundMove)));

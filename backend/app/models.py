@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -28,6 +28,17 @@ class Candidate(Base):
     resume_asset_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResumeDocument(Base):
+    __tablename__ = "resume_documents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"), nullable=True, unique=True)
+    import_item_id: Mapped[str | None] = mapped_column(ForeignKey("resume_import_items.id"), nullable=True, unique=True)
+    filename: Mapped[str] = mapped_column(String(256))
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class CandidateProfile(Base):

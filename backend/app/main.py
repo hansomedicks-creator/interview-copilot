@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from pypdf import PdfReader
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
@@ -35,6 +35,7 @@ from .models import (
     AudioRecording,
     Candidate,
     CandidateProfile,
+    ResumeDocument,
     CompanyProfileVersion,
     EvidenceItem,
     HistoricalHiringSample,
@@ -61,6 +62,7 @@ from .models import (
 from .providers import create_intelligence_provider
 from .providers.feishu_notifications import FeishuNotificationSender
 from .providers.feishu_directory import FeishuDirectory, FeishuDirectoryError
+from .services.resume_documents import bounded_document_body, validate_resume_pdf, prune_expired_documents
 from .schemas import (
     AdminJobSave,
     AssessmentDraftSave,
@@ -616,6 +618,38 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         filename = unquote(request.headers.get("x-filename", "document.txt"))
         text = _extract_document(content, filename)
         return {"filename": filename, "text": text, "character_count": len(text)}
+
+    @app.get("/api/v1/interviews/{interview_id}/resume-document")
+    def get_resume_document(interview_id: str, db: Session = Depends(get_db)) -> Response:
+        _, _, candidate, _ = _context_or_404(db, interview_id)
+        prune_expired_documents(db)
+        db.commit()
+        document = db.scalar(select(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id))
+        if not document or candidate.retention_until.replace(tzinfo=timezone.utc) <= utc_now():
+            raise HTTPException(404, "尚未保存 PDF 原件或已到期，请 HR 补传；文字简历仍在准备包中。")
+        return Response(document.content, media_type="application/pdf", headers={
+            "Content-Disposition": "inline; filename=resume.pdf",
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+        })
+
+    @app.put("/api/v1/interviews/{interview_id}/resume-document")
+    async def put_resume_document(interview_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+        _require_role(request, "hr", "admin")
+        _, _, candidate, _ = _context_or_404(db, interview_id)
+        if candidate.retention_until.replace(tzinfo=timezone.utc) <= utc_now():
+            raise HTTPException(409, "候选人资料已到期，不能补传")
+        content = await bounded_document_body(request)
+        filename = unquote(request.headers.get("x-filename", "resume.pdf"))[:256]
+        validate_resume_pdf(content, filename)
+        prune_expired_documents(db)
+        document = db.scalar(select(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id))
+        if not document:
+            document = ResumeDocument(id=new_id("pdf"), candidate_id=candidate.id)
+            db.add(document)
+        document.filename, document.content, document.expires_at = filename, content, candidate.retention_until
+        db.commit()
+        return {"saved": True}
 
     @app.get("/api/v1/admin/jobs")
     def list_jobs(request: Request, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
@@ -1307,6 +1341,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         batch = ResumeImportBatch(
             id=new_id("batch"), job_id=job.id, created_by_open_id=user["open_id"], status="uploading"
         )
+        db.flush()
         db.add(batch)
         db.commit()
         return {"id": batch.id, "status": batch.status, "job": {"id": job.id, "title": job.title}, "items": []}
@@ -1324,7 +1359,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         job = db.get(Job, batch.job_id)
         if job and not _job_accepts_new_recruitment(job):
             raise HTTPException(409, _job_recruitment_block_message(job))
-        content = await request.body()
+        content = await bounded_document_body(request)
         filename = unquote(request.headers.get("x-filename", "resume.txt"))[:256]
         digest = hashlib.sha256(content).hexdigest()
         existing = db.scalar(select(ResumeImportItem).where(ResumeImportItem.batch_id == batch.id, ResumeImportItem.content_hash == digest))
@@ -1342,6 +1377,11 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             duplicate_candidate_id=duplicate_candidate_id,
         )
         db.add(item)
+        db.flush()
+        if filename.lower().endswith(".pdf"):
+            validate_resume_pdf(content, filename)
+            prune_expired_documents(db)
+            db.add(ResumeDocument(id=new_id("pdf"), import_item_id=item.id, filename=filename, content=content, expires_at=utc_now() + timedelta(days=7)))
         db.commit()
         return _resume_item_payload(item)
 
@@ -1386,6 +1426,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             raise HTTPException(404, "resume import item not found")
         if item.candidate_id:
             raise HTTPException(409, "candidate profile already created; delete it from the recruiting task list")
+        db.execute(delete(ResumeDocument).where(ResumeDocument.import_item_id == item.id))
         db.delete(item)
         db.commit()
         return Response(status_code=204)
@@ -1395,6 +1436,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         batch_id: str, payload: ResumeImportCommit, request: Request, db: Session = Depends(get_db)
     ) -> dict[str, Any]:
         user = _require_role(request, "hr", "admin")
+        prune_expired_documents(db)
         batch = db.get(ResumeImportBatch, batch_id)
         if not batch:
             raise HTTPException(404, "resume import batch not found")
@@ -1428,7 +1470,12 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 recognition_version=(item.recognized_payload or {}).get("recognition_version", "resume-rules-v0.1"),
                 source_import_item_id=item.id, verified_by_open_id=user["open_id"], verified_at=utc_now(),
             )
-            db.add_all([candidate, application, profile])
+            db.add(candidate)
+            db.flush()
+            db.add_all([application, profile])
+            document = db.scalar(select(ResumeDocument).where(ResumeDocument.import_item_id == item.id))
+            if document:
+                document.candidate_id, document.expires_at = candidate.id, candidate.retention_until
             item.candidate_id, item.status = candidate.id, "imported"
             created.append({"candidate_id": candidate.id, "application_id": application.id, "name": name})
         batch.status, batch.completed_at = "completed", utc_now()
@@ -1695,6 +1742,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             )
         )
         if candidate and not has_other_application:
+            db.execute(delete(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id))
             profile = db.scalar(
                 select(CandidateProfile).where(CandidateProfile.candidate_id == candidate.id)
             )
