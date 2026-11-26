@@ -367,6 +367,83 @@ def test_audio_socket_recovers_once_from_retryable_asr_disconnect(tmp_path):
             assert socket.receive_json()["type"] == "audio.stopped"
 
 
+def test_long_audio_connection_retries_past_two_failures_and_keeps_wav_timeline(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main._asr_retry_delay", lambda attempt: 0)
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'long-recover.db'}",
+        settings=Settings(environment="test", recording_dir=tmp_path / "recordings"),
+    )
+    calls = 0
+
+    class FourthConnection(RecoveringFakeASRSession):
+        async def push_audio(self, pcm_s16le):
+            await self.handler(ASREvent("重连后继续完成工作说明", True, 0, 100, self.name))
+
+    def session_factory(handler):
+        nonlocal calls
+        calls += 1
+        return (FourthConnection if calls == 4 else RecoveringFakeASRSession)(handler, fail_push=calls < 4)
+
+    app.state.asr_session_factory = session_factory
+    with TestClient(app) as client:
+        interview = client.post("/api/v1/demo/bootstrap").json()["active_interview_id"]
+        client.post(f"/api/v1/interviews/{interview}/notice", json={"acknowledged_by": "tester", "candidate_was_notified": True})
+        client.post(f"/api/v1/interviews/{interview}/start")
+        with client.websocket_connect(f"/ws/interviews/{interview}/audio") as socket:
+            socket.send_json({"type": "audio.start", "audio": {"format": "pcm_s16le", "sample_rate": 16000, "channels": 1}})
+            assert socket.receive_json()["type"] == "audio.ready"
+            for attempt in (1, 2, 3):
+                socket.send_bytes(b"\x00\x00" * 1600)
+                assert socket.receive_json()["attempt"] == attempt
+                event = socket.receive_json()
+                if attempt < 3:
+                    assert event["status"] == "degraded" and event["will_retry"]
+                    if attempt == 1:
+                        assert socket.receive_json()["type"] == "audio.metrics"
+                else:
+                    assert event["type"] == "transcript.final"
+                    assert event["segment"]["start_ms"] == 200
+                    assert socket.receive_json()["recovered"] is True
+            assert calls == 4
+            socket.send_json({"type": "audio.stop"})
+            stopped = socket.receive_json()
+            assert stopped["type"] == "audio.stopped"
+            assert stopped["duration_ms"] == 300
+
+
+def test_audio_socket_does_not_retry_resource_exhaustion(tmp_path):
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'quota.db'}",
+        settings=Settings(environment="test", recording_dir=tmp_path / "recordings"),
+    )
+    calls = 0
+
+    class NoQuota(RecoveringFakeASRSession):
+        async def start(self):
+            raise ASRProviderError("quota", code="4004")
+
+    def session_factory(handler):
+        nonlocal calls
+        calls += 1
+        return NoQuota(handler, fail_push=False)
+
+    app.state.asr_session_factory = session_factory
+    with TestClient(app) as client:
+        interview = client.post("/api/v1/demo/bootstrap").json()["active_interview_id"]
+        client.post(f"/api/v1/interviews/{interview}/notice", json={"acknowledged_by": "tester", "candidate_was_notified": True})
+        client.post(f"/api/v1/interviews/{interview}/start")
+        with client.websocket_connect(f"/ws/interviews/{interview}/audio") as socket:
+            socket.send_json({"type": "audio.start", "audio": {"format": "pcm_s16le", "sample_rate": 16000, "channels": 1}})
+            ready = socket.receive_json()
+            assert ready["pipeline"]["asr_error"] == "4004"
+            assert ready["pipeline"]["asr_will_retry"] is False
+            socket.send_bytes(b"\x00\x00" * 1600)
+            assert socket.receive_json()["type"] == "audio.metrics"
+            socket.send_json({"type": "audio.stop"})
+            assert socket.receive_json()["duration_ms"] == 100
+            assert calls == 1
+
+
 class FakeSpeakerASRSession:
     name = "fake-speaker"
     configured = True

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -171,6 +172,10 @@ from .services.speaker_roles import (
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _asr_retry_delay(attempt: int) -> int:
+    return min(30, 2 ** min(attempt, 5))
 
 
 def _extract_document(content: bytes, filename: str) -> str:
@@ -3123,6 +3128,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         asr_status = "not_configured"
         asr_error: str | None = None
         asr_reconnects = 0
+        asr_retry_at: float | None = None
+        asr_ready_at = 0.0
+        audio_clock = asyncio.get_running_loop().time
         normal_stop = False
         semantic_tasks: set[asyncio.Task] = set()
         semantic_lock = asyncio.Lock()
@@ -3252,6 +3260,22 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
             semantic_tasks.add(task)
             task.add_done_callback(semantic_tasks.discard)
 
+        def schedule_asr_retry(error: Exception, *, immediate: bool = False) -> None:
+            nonlocal asr_error, asr_retry_at
+            asr_error = error.code if isinstance(error, ASRProviderError) else "provider_unavailable"
+            retryable = not isinstance(error, ASRProviderError) or error.retryable
+            asr_retry_at = (
+                audio_clock() + (0 if immediate else _asr_retry_delay(asr_reconnects))
+                if retryable else None
+            )
+
+        async def close_failed_asr(session) -> None:
+            try:
+                await session.close()
+            except Exception:
+                # A dead provider socket cannot be allowed to stop local recording.
+                pass
+
         try:
             start_message = await websocket.receive_json()
             if start_message.get("type") != "audio.start":
@@ -3315,10 +3339,11 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                 try:
                     await asr_session.start()
                     asr_status = "ready"
+                    asr_ready_at = audio_clock()
                 except Exception as exc:
                     asr_status = "degraded"
-                    asr_error = exc.code if isinstance(exc, ASRProviderError) else "provider_unavailable"
-                    await asr_session.close()
+                    schedule_asr_retry(exc)
+                    await close_failed_asr(asr_session)
             else:
                 await asr_session.start()
             recording.pipeline_backend = bridge.backend
@@ -3343,6 +3368,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                         "asr_provider": asr_session.name,
                         "asr_status": asr_status,
                         "asr_error": asr_error,
+                        "asr_will_retry": asr_retry_at is not None,
                     },
                 }
             )
@@ -3353,6 +3379,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                     break
                 pcm = message.get("bytes")
                 if pcm is not None:
+                    audio_chunk_start = recorder.duration_ms
                     try:
                         metrics = recorder.append(pcm)
                         frame_info = await bridge.push(pcm)
@@ -3365,51 +3392,44 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
                         try:
                             await asr_session.push_audio(pcm)
                         except Exception as exc:
-                            retryable = not isinstance(exc, ASRProviderError) or exc.retryable
-                            asr_error = exc.code if isinstance(exc, ASRProviderError) else "provider_unavailable"
-                            await asr_session.close()
-                            recovered = False
-                            if retryable and asr_reconnects < 2:
-                                asr_reconnects += 1
-                                await send_event(
-                                    {
-                                        "type": "asr.status",
-                                        "status": "recovering",
-                                        "provider": asr_session.name,
-                                        "error": asr_error,
-                                        "attempt": asr_reconnects,
-                                    }
-                                )
-                                replacement = app.state.asr_session_factory(handle_asr_event)
-                                try:
-                                    await asyncio.sleep(0.15 * asr_reconnects)
-                                    await replacement.start()
-                                    await replacement.push_audio(pcm)
-                                    asr_session = replacement
-                                    asr_status = "ready"
-                                    asr_error = None
-                                    recovered = True
-                                    await send_event(
-                                        {
-                                            "type": "asr.status",
-                                            "status": "ready",
-                                            "provider": asr_session.name,
-                                            "recovered": True,
-                                        }
-                                    )
-                                except Exception as reconnect_exc:
-                                    asr_error = reconnect_exc.code if isinstance(reconnect_exc, ASRProviderError) else "provider_unavailable"
-                                    await replacement.close()
-                            if not recovered:
-                                asr_status = "degraded"
-                                await send_event(
-                                    {
-                                        "type": "asr.status",
-                                        "status": asr_status,
-                                        "provider": asr_session.name,
-                                        "error": asr_error,
-                                    }
-                                )
+                            if audio_clock() - asr_ready_at >= 30:
+                                asr_reconnects = 0
+                            schedule_asr_retry(exc, immediate=not asr_reconnects)
+                            await close_failed_asr(asr_session)
+                            asr_status = "degraded"
+                            if asr_retry_at is None or asr_retry_at > audio_clock():
+                                await send_event({"type": "asr.status", "status": asr_status,
+                                                  "provider": asr_session.name, "error": asr_error,
+                                                  "will_retry": asr_retry_at is not None})
+                    if asr_retry_at is not None and audio_clock() >= asr_retry_at:
+                        asr_reconnects += 1
+                        await send_event({"type": "asr.status", "status": "recovering",
+                                          "provider": asr_session.name, "error": asr_error,
+                                          "attempt": asr_reconnects})
+
+                        async def handle_reconnected_event(event: ASREvent, offset: int = audio_chunk_start) -> None:
+                            # Tencent times are relative to the new connection, not the WAV.
+                            await handle_asr_event(replace(event, start_ms=offset + event.start_ms,
+                                                           end_ms=offset + event.end_ms))
+
+                        replacement = app.state.asr_session_factory(handle_reconnected_event)
+                        try:
+                            await replacement.start()
+                            await replacement.push_audio(pcm)
+                        except Exception as exc:
+                            await close_failed_asr(replacement)
+                            schedule_asr_retry(exc)
+                            await send_event({"type": "asr.status", "status": "degraded",
+                                              "provider": asr_session.name, "error": asr_error,
+                                              "will_retry": asr_retry_at is not None})
+                        else:
+                            asr_session = replacement
+                            asr_status = "ready"
+                            asr_ready_at = audio_clock()
+                            asr_error = None
+                            asr_retry_at = None
+                            await send_event({"type": "asr.status", "status": asr_status,
+                                              "provider": asr_session.name, "recovered": True})
                     if recorder.chunk_count == 1 or recorder.chunk_count % 10 == 0:
                         with database.session_factory() as db:
                             persisted = db.get(AudioRecording, recording.id)

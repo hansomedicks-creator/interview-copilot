@@ -320,27 +320,36 @@ async function logout() {
 function renderAsrStatus(asr = {}) {
   const status = asr.status || "not_configured";
   const provider = asr.provider === "tencent" ? "腾讯云" : "ASR";
+  const why = ({
+    4002: "腾讯云鉴权失败，请管理员核对 ASR 配置。",
+    4003: "腾讯云账号尚未开通该服务。",
+    4004: "腾讯云 ASR 资源包已耗尽，请管理员检查余量。",
+    4005: "腾讯云账号欠费，请管理员检查。",
+    4008: "腾讯云一段时间未收到音频。",
+    4009: "腾讯云识别连接断开。",
+  })[asr.error] || "";
   const badge = $("asr-badge");
   badge.className = `pill ${status === "ready" ? "ready" : status === "degraded" ? "degraded" : "warning"}`;
   badge.classList.toggle("runtime-alert", status !== "ready");
   badge.textContent = status === "ready" ? `${provider} ASR 就绪` : status === "recovering" ? `${provider} ASR 重连中` : status === "degraded" ? `${provider} ASR 降级` : "ASR 未配置";
   $("mode-hint").textContent = status === "ready"
     ? `麦克风真实收音 · ${provider}实时字幕 · 文字输入可作降级测试`
-    : status === "recovering" || status === "degraded"
+    : status === "recovering" || (status === "degraded" && asr.will_retry)
       ? "录音持续保存 · 实时字幕连接正在恢复 · 文字输入可作临时补充"
-      : "麦克风真实收音 · ASR 未配置 · 文字输入用于降级测试";
+      : status === "degraded" ? "实时字幕暂不可用 · 录音持续保存"
+        : "麦克风真实收音 · ASR 未配置 · 文字输入用于降级测试";
   $("asr-boundary").className = `asr-boundary${status === "ready" ? " ready" : status === "degraded" ? " degraded" : ""}`;
   $("asr-boundary-title").textContent = status === "ready"
     ? `当前状态：${provider}实时 ASR 已接入。`
     : status === "recovering" ? `${provider}实时字幕连接短暂波动，正在自动重连；录音没有中断。`
-      : status === "degraded" ? `${provider}实时字幕连续重连失败，录音仍在继续。` : "当前状态：已具备收音与录音能力，ASR 尚未配置。";
+      : status === "degraded" ? `${provider}实时字幕暂不可用，录音仍在继续。` : "当前状态：已具备收音与录音能力，ASR 尚未配置。";
   $("asr-boundary-detail").textContent = status === "ready"
     ? (asr.speaker_diarization === false
       ? "稳定结果会写入逐字稿；当前引擎未开启话者分离，声音身份需要人工确认。"
       : "稳定结果会写入逐字稿；系统自动区分声源并判断角色，低置信度内容不会进入候选人证据。")
-    : status === "recovering"
-      ? "重连期间声音仍写入 WAV；连接恢复后继续生成实时字幕。短暂断线区间可能需要会后补转写。"
-      : "声音仍会进入 Pipecat 音频帧边界并保存为 WAV；实时语义追问会失去这段字幕上下文，手动逐字稿可作为临时补充。";
+    : status === "recovering" || (status === "degraded" && asr.will_retry)
+      ? why + "系统会自动重试。中断期间的声音保存在录音中，但不会自动补成实时字幕。"
+      : why + "实时追问不会收到缺失的字幕，必要时可手动补充逐字稿。";
 }
 
 function localDateTimeValue(date) {
@@ -2884,7 +2893,7 @@ async function connectAudioSocket() {
         clearTimeout(timer);
         state.audioReady = true;
         $("audio-pipeline").textContent = message.pipeline.pipecat_installed ? "Pipecat 帧桥" : "原生帧桥";
-        renderAsrStatus({ ...(state.capabilities?.asr || {}), status: message.pipeline.asr_status, provider: message.pipeline.asr_provider });
+        renderAsrStatus({ ...(state.capabilities?.asr || {}), status: message.pipeline.asr_status, provider: message.pipeline.asr_provider, error: message.pipeline.asr_error, will_retry: message.pipeline.asr_will_retry });
         resolve();
       } else if (message.type === "audio.metrics") {
         $("audio-duration").textContent = formatDuration(message.duration_ms);
@@ -2906,6 +2915,10 @@ async function connectAudioSocket() {
       } else if (message.type === "analysis.update") {
         renderAnalysis(message.analysis);
       } else if (message.type === "asr.status") {
+        if (message.status !== "ready") {
+          $("interim-transcript").classList.add("hidden");
+          $("interim-text").textContent = "";
+        }
         renderAsrStatus(message);
         if (message.recovered) toast("实时字幕连接已自动恢复");
       } else if (message.type === "error") {
