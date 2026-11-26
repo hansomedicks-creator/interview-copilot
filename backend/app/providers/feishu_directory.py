@@ -10,6 +10,37 @@ class FeishuDirectoryError(RuntimeError):
     pass
 
 
+DIRECTORY_READ_SCOPES = {
+    "contact:contact.base:readonly",
+    "contact:department.organize:readonly",
+    "contact:department.base:readonly",
+    "contact:contact:access_as_app",
+    "contact:contact:readonly",
+    "contact:contact:readonly_as_app",
+    "contact:user.base:readonly",
+}
+
+
+def _directory_error(path: str, data: dict, status_code: int) -> str:
+    stage = "读取部门" if path == "departments/0/children" else "读取部门成员"
+    code = data.get("code")
+    if not isinstance(code, int) or code == 0:
+        code = status_code
+    base = f"飞书通讯录同步失败：{stage}（{code}）。"
+    if code in {99991672, 99991679}:
+        metadata = data.get("error")
+        violations = metadata.get("permission_violations") if isinstance(metadata, dict) else None
+        scopes = sorted({
+            item["subject"] for item in (violations if isinstance(violations, list) else [])
+            if isinstance(item, dict) and isinstance(item.get("subject"), str)
+            and item["subject"] in DIRECTORY_READ_SCOPES
+        })
+        hint = "飞书返回待核对的权限项：" + "、".join(scopes) + "。" if scopes else "请核对应用身份的通讯录接口和用户基本信息权限。"
+    else:
+        hint = "请核对应用身份的通讯录权限。"
+    return base + hint + "整组织同步需将通讯录数据范围设为全部成员；管理员批准并发布新版后重试。本次未写入。"
+
+
 class FeishuDirectory:
     def __init__(self, sender: FeishuNotificationSender):
         self.sender = sender
@@ -36,10 +67,7 @@ class FeishuDirectory:
                     )
                     data = response.json()
                     if response.is_error or data.get("code", 0):
-                        code = data.get("code", response.status_code)
-                        raise FeishuDirectoryError(
-                            f"飞书通讯录读取失败（{code}）。请管理员确认通讯录读取、用户基本信息权限，以及数据范围为全部成员；发布应用后重试。本次未写入。"
-                        )
+                        raise FeishuDirectoryError(_directory_error(path, data, response.status_code))
                     page = data["data"]
                     yield from page.get("items", [])
                     if not page.get("has_more"):
