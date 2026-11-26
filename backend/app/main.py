@@ -12,8 +12,6 @@ from pathlib import Path, PurePath
 import secrets
 from typing import Any
 from urllib.parse import quote, unquote, urlencode
-from zipfile import BadZipFile, ZipFile
-from xml.etree import ElementTree
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
@@ -62,7 +60,10 @@ from .models import (
 from .providers import create_intelligence_provider
 from .providers.feishu_notifications import FeishuNotificationSender
 from .providers.feishu_directory import FeishuDirectory, FeishuDirectoryError
-from .services.resume_documents import bounded_document_body, validate_resume_pdf, prune_expired_documents
+from .services.resume_documents import (
+    bounded_document_body, document_byte_limit, prune_expired_documents,
+    read_word_text, validate_resume_pdf, word_preview_pages,
+)
 from .schemas import (
     AdminJobSave,
     AssessmentDraftSave,
@@ -175,28 +176,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 def _extract_document(content: bytes, filename: str) -> str:
     if not content:
         raise HTTPException(422, "document is empty")
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, "document exceeds 10 MB")
     suffix = PurePath(filename).suffix.lower()
+    if len(content) > document_byte_limit(filename):
+        raise HTTPException(413, f"文件不能超过 {document_byte_limit(filename) // (1024 * 1024)} MB")
+    if suffix == ".docx":
+        return read_word_text(content).replace("\f", "\n")
     try:
         if suffix in {".txt", ".md"}:
             text = content.decode("utf-8-sig")
-        elif suffix == ".docx":
-            with ZipFile(BytesIO(content)) as archive:
-                document_xml = archive.read("word/document.xml")
-            root = ElementTree.fromstring(document_xml)
-            paragraphs = []
-            for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
-                runs = [node.text or "" for node in paragraph.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")]
-                if runs:
-                    paragraphs.append("".join(runs))
-            text = "\n".join(paragraphs)
         elif suffix == ".pdf":
             reader = PdfReader(BytesIO(content))
             text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
         else:
             raise HTTPException(415, "supported formats: .pdf, .docx, .txt, .md")
-    except (BadZipFile, KeyError, ElementTree.ParseError, UnicodeDecodeError, ValueError) as error:
+    except (KeyError, UnicodeDecodeError, ValueError) as error:
         raise HTTPException(422, f"document could not be parsed: {error}") from error
     text = text.strip()
     if not text:
@@ -614,9 +607,9 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
 
     @app.post("/api/v1/document-text")
     async def extract_document_text(request: Request) -> dict[str, Any]:
-        content = await request.body()
         filename = unquote(request.headers.get("x-filename", "document.txt"))
-        text = _extract_document(content, filename)
+        content = await bounded_document_body(request, filename)
+        text = await asyncio.to_thread(_extract_document, content, filename)
         return {"filename": filename, "text": text, "character_count": len(text)}
 
     @app.get("/api/v1/interviews/{interview_id}/resume-document")
@@ -626,7 +619,10 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         db.commit()
         document = db.scalar(select(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id))
         if not document or candidate.retention_until.replace(tzinfo=timezone.utc) <= utc_now():
-            raise HTTPException(404, "尚未保存 PDF 原件或已到期，请 HR 补传；文字简历仍在准备包中。")
+            raise HTTPException(404, "没有可查看的简历附件，可能尚未上传或已到期。请 HR 补传 PDF 或 .docx。")
+        if document.filename.lower().endswith(".docx"):
+            return JSONResponse({"format": "docx", "pages": word_preview_pages(read_word_text(document.content))},
+                                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
         return Response(document.content, media_type="application/pdf", headers={
             "Content-Disposition": "inline; filename=resume.pdf",
             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -639,13 +635,14 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         _, _, candidate, _ = _context_or_404(db, interview_id)
         if candidate.retention_until.replace(tzinfo=timezone.utc) <= utc_now():
             raise HTTPException(409, "候选人资料已到期，不能补传")
-        content = await bounded_document_body(request)
         filename = unquote(request.headers.get("x-filename", "resume.pdf"))[:256]
-        validate_resume_pdf(content, filename)
+        content = await bounded_document_body(request, filename)
+        validate = read_word_text if filename.lower().endswith(".docx") else lambda data: validate_resume_pdf(data, filename)
+        await asyncio.to_thread(validate, content)
         prune_expired_documents(db)
         document = db.scalar(select(ResumeDocument).where(ResumeDocument.candidate_id == candidate.id))
         if not document:
-            document = ResumeDocument(id=new_id("pdf"), candidate_id=candidate.id)
+            document = ResumeDocument(id=new_id("doc"), candidate_id=candidate.id)
             db.add(document)
         document.filename, document.content, document.expires_at = filename, content, candidate.retention_until
         db.commit()
@@ -1359,13 +1356,13 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         job = db.get(Job, batch.job_id)
         if job and not _job_accepts_new_recruitment(job):
             raise HTTPException(409, _job_recruitment_block_message(job))
-        content = await bounded_document_body(request)
         filename = unquote(request.headers.get("x-filename", "resume.txt"))[:256]
+        content = await bounded_document_body(request, filename)
         digest = hashlib.sha256(content).hexdigest()
         existing = db.scalar(select(ResumeImportItem).where(ResumeImportItem.batch_id == batch.id, ResumeImportItem.content_hash == digest))
         if existing:
             return _resume_item_payload(existing)
-        text = _extract_document(content, filename)
+        text = await asyncio.to_thread(_extract_document, content, filename)
         recognized = recognize_resume(text, filename)
         duplicate_candidate_id = _find_duplicate_candidate(db, recognized["fields"])
         if duplicate_candidate_id:
@@ -1378,10 +1375,11 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         )
         db.add(item)
         db.flush()
-        if filename.lower().endswith(".pdf"):
-            validate_resume_pdf(content, filename)
+        if filename.lower().endswith((".pdf", ".docx")):
+            if filename.lower().endswith(".pdf"):
+                validate_resume_pdf(content, filename)
             prune_expired_documents(db)
-            db.add(ResumeDocument(id=new_id("pdf"), import_item_id=item.id, filename=filename, content=content, expires_at=utc_now() + timedelta(days=7)))
+            db.add(ResumeDocument(id=new_id("doc"), import_item_id=item.id, filename=filename, content=content, expires_at=utc_now() + timedelta(days=7)))
         db.commit()
         return _resume_item_payload(item)
 

@@ -1802,3 +1802,6 @@ body.role-admin .task-header > div > .kicker { display: none; }
 .resume-preview header strong { font-size: 16px; }
 .resume-preview p { margin: 8px 14px; font-size: 14px; }
 .resume-preview iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+.resume-word-page { flex: 1; min-height: 0; overflow: auto; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.resume-word-nav { display: flex; align-items: center; justify-content: center; gap: 12px; border-top: 1px solid #ebe6f4; padding: 8px; font-size: 14px; }
+.resume-word-nav.hidden, .resume-word-page.hidden { display: none; }

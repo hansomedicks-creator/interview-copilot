@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Interview Copilot · AI 面试伴侣</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.4.0-resume-preview" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.4.2-word-preview" />
   </head>
   <body>
     <header class="topbar">
@@ -118,7 +118,7 @@
               <fieldset>
                 <legend><b>01</b> 候选人资料</legend>
                 <label>候选人姓名<input name="candidate_name" required maxlength="128" placeholder="例如：张三" /></label>
-                <label>导入简历文件 <span class="field-hint">PDF / Word / TXT，最多 10 MB</span><input class="file-input" id="resume-file" type="file" accept=".pdf,.docx,.txt,.md" /></label>
+                <label>导入简历文件 <span class="field-hint">Word（.docx）最多 20 MB；PDF、TXT 等最多 10 MB</span><input class="file-input" id="resume-file" type="file" accept=".pdf,.docx,.txt,.md" /></label>
                 <label>简历内容<textarea name="resume_text" required rows="8" placeholder="粘贴简历正文，或从上方文件自动提取"></textarea></label>
               </fieldset>
               <fieldset>
@@ -424,7 +424,7 @@
             <label id="resume-dropzone" class="resume-dropzone">
               <input id="resume-batch-files" type="file" multiple accept=".pdf,.docx,.txt,.md" />
               <strong>把多份简历拖到这里，或点击选择文件</strong>
-              <span>支持 PDF、Word、TXT、Markdown；单份最多 10 MB，建议一次不超过 50 份</span>
+              <span>Word（.docx）单份最多 20 MB；PDF、TXT、Markdown 单份最多 10 MB；建议一次不超过 50 份</span>
             </label>
           </section>
           <div id="import-progress" class="import-progress hidden"><div><strong id="import-progress-title">正在识别</strong><span id="import-progress-detail">0 / 0</span></div><progress id="import-progress-bar" value="0" max="1"></progress></div>
@@ -459,7 +459,7 @@
         </div>
 
         <section id="preparation-brief" class="preparation-brief panel">
-          <div class="prep-heading"><div><span class="kicker">PRE-INTERVIEW BRIEF</span><h3>面试前准备包</h3></div><div class="prep-heading-actions"><button id="resume-preview-btn" type="button" class="secondary compact">悬浮查看简历</button><label class="admin-only secondary compact">补传 PDF<input id="resume-replace-file" type="file" accept=".pdf" hidden /></label><button id="prep-report-btn" class="secondary compact hidden">查看锁定汇总报告</button><span id="prep-status" class="pill">正在生成</span></div></div>
+          <div class="prep-heading"><div><span class="kicker">PRE-INTERVIEW BRIEF</span><h3>面试前准备包</h3></div><div class="prep-heading-actions"><button id="resume-preview-btn" type="button" class="secondary compact">悬浮查看简历</button><label class="admin-only secondary compact">补传 PDF / Word<input id="resume-replace-file" type="file" accept=".pdf,.docx" hidden /></label><button id="prep-report-btn" class="secondary compact hidden">查看锁定汇总报告</button><span id="prep-status" class="pill">正在生成</span></div></div>
           <div class="prep-grid">
             <div><small>简历已识别事实</small><div id="prep-facts" class="prep-chips"></div></div>
             <div><small>岗位重点</small><div id="prep-focus" class="prep-chips"></div></div>
@@ -686,13 +686,19 @@
       </div>
     </dialog>
     <div id="toast" class="toast hidden"></div>
-    <section id="resume-preview" class="resume-preview hidden" role="region" aria-label="PDF 简历悬浮窗口">
-      <header id="resume-preview-handle"><strong id="resume-preview-title">PDF 简历</strong><button id="resume-preview-close" type="button" aria-label="关闭简历">关闭</button></header>
+    <section id="resume-preview" class="resume-preview hidden" role="region" aria-label="简历悬浮窗口">
+      <header id="resume-preview-handle"><strong id="resume-preview-title">候选人简历</strong><button id="resume-preview-close" type="button" aria-label="关闭简历">关闭</button></header>
       <p id="resume-preview-message" role="status"></p>
       <iframe id="resume-preview-frame" title="候选人 PDF 简历" src="about:blank"></iframe>
+      <div id="resume-word-page" class="resume-word-page hidden" tabindex="0" aria-label="Word 简历正文"></div>
+      <nav id="resume-word-nav" class="resume-word-nav hidden" aria-label="Word 简历翻页">
+        <button id="resume-word-prev" type="button" class="secondary compact">上一页</button>
+        <span id="resume-word-count" aria-live="polite"></span>
+        <button id="resume-word-next" type="button" class="secondary compact">下一页</button>
+      </nav>
     </section>
-    <script src="/static/resume-preview.js?v=1" defer></script>
+    <script src="/static/resume-preview.js?v=2" defer></script>
     <script src="/static/job-assessment.js?v=1.3.1-weighted-assessment" defer></script>
-    <script src="/static/app.js?v=1.4.1-hr-live-context" defer></script>
+    <script src="/static/app.js?v=1.4.2-word-preview" defer></script>
   </body>
 </html>

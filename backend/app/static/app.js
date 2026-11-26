@@ -113,8 +113,8 @@ async function importDocument(fileInputId, targetFieldName) {
       headers: { "Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(file.name) },
       body: file,
     });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `文件上传失败（${response.status}）`);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "文件解析失败");
     $("task-form").elements[targetFieldName].value = data.text;
     toast(`已从 ${data.filename} 提取 ${data.character_count} 个字符，请检查内容`);
   } catch (error) {
@@ -861,8 +861,8 @@ async function beginResumeUpload(files) {
         const response = await fetch(`/api/v1/admin/resume-imports/${state.importBatch.id}/items`, {
           method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(file.name) }, body: file,
         });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `简历上传失败（${response.status}）`);
         const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "简历解析失败");
         state.importItems.push(data);
       } catch (error) {
         state.importItems.push({ id: `error-${index}`, filename: file.name, status: "error", error_message: error.message, recognized: { fields: {}, confidence: {}, evidence: {}, warnings: [error.message] } });
@@ -1950,6 +1950,7 @@ async function enterTodayInterviews() {
 async function createInterviewTask(event) {
   event.preventDefault();
   const form = event.currentTarget;
+  const originalResume = state.schedulingApplicationId ? null : $("resume-file").files?.[0];
   const submit = $("task-submit-btn");
   submit.disabled = true;
   const value = (name) => form.elements[name].value.trim();
@@ -1984,11 +1985,10 @@ async function createInterviewTask(event) {
     });
     state.rounds = data.rounds;
     state.interviewId = data.active_interview_id;
-    let pdfWarning = "";
-    const originalPdf = $("resume-file").files?.[0];
-    if (!state.schedulingApplicationId && originalPdf?.name.toLowerCase().endsWith(".pdf")) {
-      try { await window.resumePreview.upload(state.interviewId, originalPdf); }
-      catch (error) { pdfWarning = `任务已创建，但 PDF 未保存：${error.message}。请在准备包补传，不要重复创建任务。`; }
+    let attachmentWarning = "";
+    if (/\.(pdf|docx)$/i.test(originalResume?.name || "")) {
+      try { await window.resumePreview.upload(data.active_interview_id, originalResume); }
+      catch (error) { attachmentWarning = `任务已创建，但简历附件未保存：${error.message}。请在准备包补传，不要重复创建任务。`; }
     }
     form.reset();
     state.schedulingApplicationId = null;
@@ -2001,8 +2001,8 @@ async function createInterviewTask(event) {
     $("workspace").classList.remove("hidden");
     await loadTodayInterviews();
     await loadInterview();
-    toast(pdfWarning || `已创建 ${data.candidate.display_name} 的 ${data.rounds.length} 轮面试任务`, Boolean(pdfWarning));
-    if (pdfWarning) { $("directory-status").textContent = pdfWarning; }
+    toast(attachmentWarning || `已创建 ${data.candidate.display_name} 的 ${data.rounds.length} 轮面试任务`, Boolean(attachmentWarning));
+    if (attachmentWarning) { $("directory-status").textContent = attachmentWarning; }
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3702,10 +3702,11 @@ $("resume-replace-file").addEventListener("change", async event => {
   const file = event.target.files?.[0];
   if (!file) return;
   try {
-    if (!window.confirm("将替换当前候选人的 PDF 预览原件，文字简历与已生成问题不会改变。确认是同一位候选人吗？")) return;
-    await window.resumePreview.upload(state.interviewId, file);
-    await window.resumePreview.open(state.interviewId, $("candidate-name").textContent);
-    toast("PDF 原件已保存；文字简历和评分不变");
+    const interviewId = state.interviewId;
+    if (!window.confirm("将替换当前候选人的预览附件，文字简历与已生成问题不会改变。确认是同一位候选人吗？")) return;
+    await window.resumePreview.upload(interviewId, file);
+    if (interviewId === state.interviewId) await window.resumePreview.open(interviewId, $("candidate-name").textContent);
+    toast("简历附件已保存；文字简历和评分不变");
   } catch (error) { toast(error.message, true); }
   finally { event.target.value = ""; }
 });

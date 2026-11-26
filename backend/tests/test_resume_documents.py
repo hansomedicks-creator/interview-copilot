@@ -1,5 +1,7 @@
 from datetime import timedelta
 from io import BytesIO
+from xml.sax.saxutils import escape
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
@@ -8,6 +10,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.main import create_app
 from app.models import ResumeDocument, utc_now
+from app.services.resume_documents import MAX_WORD_XML_BYTES
 from test_api import make_client, bootstrap
 
 
@@ -16,6 +19,19 @@ def pdf_bytes():
     writer.add_blank_page(width=300, height=400)
     output = BytesIO()
     writer.write(output)
+    return output.getvalue()
+
+
+def word_bytes(*pages, padding=0):
+    output = BytesIO()
+    xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    xml += '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'.join(
+        f"<w:p><w:r><w:t>{escape(page)}</w:t></w:r></w:p>" for page in pages
+    )
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", xml + "</w:body></w:document>")
+        if padding:
+            archive.writestr("word/media/embedded.bin", b"0" * padding, compress_type=0)
     return output.getvalue()
 
 
@@ -78,3 +94,49 @@ def test_batch_original_links_to_candidate_and_deleted_item_removes_original(tmp
             doc = db.scalar(select(ResumeDocument))
             assert doc.candidate_id == result.json()["created"][0]["candidate_id"]
             assert doc.content == pdf_bytes()
+
+
+def test_large_word_import_and_multipage_private_preview(tmp_path):
+    first = "姓名：李测试"
+    final = "最后一页 <示例内容>"
+    content = word_bytes(first, "真实工作经历：" * 1600, final, padding=11 * 1024 * 1024)
+    assert len(content) > 10 * 1024 * 1024
+    headers = {"X-Filename": "resume.docx"}
+    with make_client(tmp_path) as client:
+        parsed = client.post("/api/v1/document-text", content=content, headers=headers)
+        assert parsed.status_code == 200
+        assert parsed.json()["text"].endswith(final)
+        interview = bootstrap(client)["active_interview_id"]
+        url = f"/api/v1/interviews/{interview}/resume-document"
+        assert client.put(url, content=content, headers=headers).status_code == 200
+        response = client.get(url)
+        assert response.headers["cache-control"] == "no-store"
+        preview = response.json()
+        assert preview["format"] == "docx"
+        assert preview["pages"][0] == first
+        assert preview["pages"][-1] == final
+        assert len(preview["pages"]) > 3
+        assert client.put(url, content=pdf_bytes()).status_code == 200
+        assert client.get(url).headers["content-type"] == "application/pdf"
+
+
+def test_word_batch_persists_attachment_and_rejects_unbounded_xml(tmp_path):
+    headers = {"X-Filename": "resume.docx"}
+    with make_client(tmp_path) as client:
+        malformed = client.post("/api/v1/document-text", content=b"bad zip", headers=headers)
+        assert malformed.status_code == 422
+        too_large = client.post("/api/v1/document-text", content=word_bytes("x" * MAX_WORD_XML_BYTES), headers=headers)
+        assert too_large.status_code == 413
+        batch = client.post("/api/v1/admin/resume-imports", json={"job_title": "测试岗位", "jd_text": "处理客户工单"}).json()
+        url = f"/api/v1/admin/resume-imports/{batch['id']}/items"
+        original = word_bytes("姓名：李测试", "负责处理客户工单")
+        uploaded = client.post(url, content=original, headers=headers)
+        assert uploaded.status_code == 201
+        item_id = uploaded.json()["id"]
+        client.patch(f"{url}/{item_id}", json={"name": "李测试"})
+        result = client.post(f"/api/v1/admin/resume-imports/{batch['id']}/commit", json={"item_ids": [item_id]})
+        assert result.status_code == 200
+        with client.app.state.database.session_factory() as db:
+            doc = db.scalar(select(ResumeDocument))
+            assert doc.candidate_id == result.json()["created"][0]["candidate_id"]
+            assert doc.content == original
